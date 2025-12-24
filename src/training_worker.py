@@ -168,21 +168,6 @@ def training_loop(
             print(f"\n[Step {train_step}] Saving checkpoint...")
             checkpoint_path = save_checkpoint(model, tokenizer, train_step, config)
             
-            # Evaluate on training subset for analysis
-            print(f"[Step {train_step}] Evaluating on training subset...")
-            train_eval_results = evaluate_train_subset(
-                model, tokenizer, train_data, config, train_step, device
-            )
-            
-            # Log training evaluation metrics to W&B
-            wandb.log({
-                "train_eval/accuracy": train_eval_results['accuracy'],
-                "train_eval/format_accuracy": train_eval_results['format_accuracy'],
-                "train_eval/avg_response_length": train_eval_results['avg_response_length'],
-                "train_eval/avg_token_entropy": train_eval_results['avg_token_entropy'],
-                "train_step": train_step,
-            })
-            
             # Push to eval queue (non-blocking)
             if eval_queue is not None:
                 try:
@@ -201,12 +186,6 @@ def training_loop(
     # Final checkpoint
     print(f"\n[Final] Saving final checkpoint...")
     final_checkpoint_path = save_checkpoint(model, tokenizer, train_step, config)
-    
-    # Final training evaluation
-    print(f"[Final] Evaluating on training subset...")
-    train_eval_results = evaluate_train_subset(
-        model, tokenizer, train_data, config, train_step, device
-    )
     
     # Signal eval worker to stop
     if eval_queue is not None:

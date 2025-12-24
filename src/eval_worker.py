@@ -191,6 +191,7 @@ def eval_worker(
         device=device,
         dtype="float16",  # vLLM typically uses float16
         seed=seed,
+        gpu_memory_utilization=0.7  # Reduce from default 0.9 to avoid OOM
     )
     
     # Create sampling parameters
