@@ -1,2 +1,4 @@
 wandb
-results
+results/analysis
+results/eval_logs
+results/checkpoints
