@@ -8,19 +8,19 @@ model:
 training:
   learning_rate: 2.0e-5
   weight_decay: 0.01
-  batch_size: 1
+  batch_size: 16              # Optimal for H100 80GB (~28GB usage)
   num_epochs: 1
-  gradient_accumulation_steps: 4
-  warmup_steps: 100
-  max_batches: 50
-  eval_every: 500
+  gradient_accumulation_steps: 4  # Effective batch = 64
+  warmup_steps: 10            # Reduced for small test run
+  max_batches: 20             # Small test run (20 batches)
+  eval_every: 10              # Evaluate after 10 batches
   device: "cuda:0"
 
 # Evaluation Configuration
 evaluation:
   device: "cuda:1"
-  batch_size: 128
-  num_eval_samples: 100
+  batch_size: 256             # Large batch for fast eval (~40GB usage)
+  num_eval_samples: 50        # Reduced for quick test eval
   temperature: 1.0
   top_p: 1.0
   max_tokens: 1024
@@ -48,4 +48,4 @@ checkpointing:
 logging:
   wandb_project: "math-sft"
   wandb_entity: null
-  log_every: 10
+  log_every: 1                # Log EVERY batch to W&B

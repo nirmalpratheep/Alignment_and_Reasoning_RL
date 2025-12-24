@@ -49,7 +49,7 @@ def load_datasets(config):
         tokenizer.pad_token = tokenizer.eos_token
     
     # Prepare SFT format
-    from step1_sft import prepare_sft_dataset
+    from src.data_utils import prepare_sft_dataset
     
     print("\nPreparing SFT format...")
     train_data = prepare_sft_dataset(train_examples, prompt_template)
