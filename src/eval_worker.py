@@ -160,8 +160,8 @@ def eval_worker(
 ) -> None:
     """Evaluation worker process on GPU 1.
     
-    Continuously watches queue for checkpoint paths, loads them into vLLM,
-    and runs validation with detailed logging.
+    Continuously watches queue for checkpoint paths and reloads vLLM
+    from each checkpoint to run validation.
     
     Args:
         queue: Multiprocessing queue for receiving checkpoint paths
@@ -170,6 +170,7 @@ def eval_worker(
         seed: Random seed
     """
     from transformers import AutoTokenizer
+    from vllm import LLM
     
     print("="*80)
     print("STARTING EVALUATION WORKER (GPU 1)")
@@ -184,16 +185,6 @@ def eval_worker(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
-    # Initialize vLLM
-    print(f"Initializing vLLM on {device}...")
-    llm = init_vllm(
-        model_id=config.model.name,
-        device=device,
-        dtype="float16",  # vLLM typically uses float16
-        seed=seed,
-        gpu_memory_utilization=0.7  # Reduce from default 0.9 to avoid OOM
-    )
-    
     # Create sampling parameters
     sampling_params = create_sampling_params(
         temperature=config.evaluation.temperature,
@@ -207,6 +198,7 @@ def eval_worker(
     print("="*80)
     
     eval_step = 0
+    llm = None  # vLLM instance will be created per checkpoint
     
     # Main evaluation loop
     while True:
@@ -219,23 +211,25 @@ def eval_worker(
             print("Received shutdown signal. Exiting eval worker.")
             break
         
-        print(f"[Eval Step {eval_step}] Loading checkpoint: {checkpoint_path}")
+        print(f"[Eval Step {eval_step}] Loading vLLM from checkpoint: {checkpoint_path}")
         
         try:
-            # Load checkpoint
-            policy = AutoModelForCausalLM.from_pretrained(
-                checkpoint_path,
-                torch_dtype=torch.bfloat16,
-            ).to(device)
+            # Clean up previous vLLM instance to free memory
+            if llm is not None:
+                del llm
+                torch.cuda.empty_cache()
             
-            # Load into vLLM
-            load_policy_into_vllm_instance(policy, llm)
+            # Reload vLLM directly from checkpoint (correct approach for vLLM 0.4+)
+            llm = LLM(
+                model=checkpoint_path,  # Load directly from checkpoint
+                dtype="float16",
+                seed=seed,
+                gpu_memory_utilization=0.7,
+                tensor_parallel_size=1,
+                enforce_eager=True,
+            )
             
-            # Clean up policy to free memory
-            del policy
-            torch.cuda.empty_cache()
-            
-            print(f"✓ Checkpoint loaded into vLLM")
+            print(f"✓ vLLM loaded from checkpoint")
             
             # Run evaluation with detailed logging
             print(f"Running evaluation on {config.evaluation.num_eval_samples} samples...")
@@ -267,6 +261,11 @@ def eval_worker(
             traceback.print_exc()
         
         eval_step += 1
+    
+    # Cleanup
+    if llm is not None:
+        del llm
+        torch.cuda.empty_cache()
     
     print("="*80)
     print("EVALUATION WORKER STOPPED")
