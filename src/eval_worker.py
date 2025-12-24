@@ -176,9 +176,17 @@ def eval_worker(
     print("STARTING EVALUATION WORKER (GPU 1)")
     print("="*80)
     
-    # Set device
+    # Set device - MUST set CUDA_VISIBLE_DEVICES for vLLM
     device = config.evaluation.device
-    torch.cuda.set_device(device)
+    
+    # Extract GPU index and set environment variable
+    import os
+    if "cuda:" in device:
+        gpu_idx = device.split(":")[-1]
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_idx
+        print(f"✓ Set CUDA_VISIBLE_DEVICES={gpu_idx} for vLLM")
+    
+    torch.cuda.set_device(0)  # Now GPU 1 appears as GPU 0 to this process
     
     # Load tokenizer for metric computation
     tokenizer = AutoTokenizer.from_pretrained(config.model.name, trust_remote_code=True)
