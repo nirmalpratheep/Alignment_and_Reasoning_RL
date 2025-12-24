@@ -154,6 +154,10 @@ def training_loop(
         
         # Logging
         if train_step % config.logging.log_every == 0:
+            # Log GPU stats
+            from src.gpu_monitor import log_gpu_stats_to_wandb
+            gpu_stats = log_gpu_stats_to_wandb(device, prefix="train_gpu", step=train_step)
+            
             wandb.log({
                 "train/loss": loss.item(),
                 "train/learning_rate": scheduler.get_last_lr()[0],

@@ -194,6 +194,15 @@ def eval_worker(
         include_stop_str=config.generation.include_stop_str
     )
     
+    # Initialize W&B in this process (required for multiprocessing)
+    wandb.init(
+        project=config.logging.wandb_project,
+        name=f"eval-worker-{wandb.util.generate_id()}",
+        group="dual-gpu-training",
+        job_type="evaluation",
+        reinit=True
+    )
+    
     print("✓ Evaluation worker ready")
     print("="*80)
     
@@ -247,6 +256,11 @@ def eval_worker(
                 "eval/avg_token_entropy": metrics['avg_token_entropy'],
                 "eval_step": eval_step,
             })
+            
+            # Log GPU stats
+            from src.gpu_monitor import log_gpu_stats_to_wandb, print_gpu_stats
+            log_gpu_stats_to_wandb(device, prefix="eval_gpu", step=eval_step)
+            print_gpu_stats(device, label="Eval GPU")
             
             print(f"✓ Evaluation complete:")
             print(f"  - Accuracy: {metrics['accuracy']:.3f}")
