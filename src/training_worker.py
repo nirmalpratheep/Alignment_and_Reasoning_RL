@@ -303,6 +303,8 @@ def evaluate_train_subset(
             # Grade response
             from utils.drgrpo_grader import r1_zero_reward_fn
             ground_truth = ex.get('solution', '')
+            problem = ex.get('problem', '')
+            solution = ex.get('solution', '')
             reward_dict = r1_zero_reward_fn(response, ground_truth, fast=True)
             
             # Compute metrics
@@ -335,7 +337,9 @@ def evaluate_train_subset(
                 answer_reward=reward_dict['answer_reward'],
                 total_reward=reward_dict['reward'],
                 token_entropy=token_entropy,
-                response_length=response_length
+                response_length=response_length,
+                problem=problem,
+                solution=solution
             )
             
             if reward_dict['format_reward'] == 1.0:

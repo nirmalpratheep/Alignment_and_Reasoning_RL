@@ -16,7 +16,8 @@ def evaluate_checkpoint(
     sampling_params,
     config: Config,
     tokenizer,
-    eval_step: int
+    eval_step: int,
+    prompt_template: str
 ) -> dict:
     """Evaluate current checkpoint on validation set with detailed logging and analysis.
     
@@ -27,6 +28,7 @@ def evaluate_checkpoint(
         config: Configuration object
         tokenizer: Tokenizer for computing metrics
         eval_step: Current evaluation step
+        prompt_template: Prompt template for formatting prompts
         
     Returns:
         Dictionary with evaluation metrics
@@ -49,9 +51,16 @@ def evaluate_checkpoint(
         eval_step=eval_step
     )
     
-    # Generate responses
+    # Prepare prompts from problem (same as evaluate_model.py)
+    print(f"  Preparing prompts for {num_eval} examples...")
+    prompts = []
+    for example in eval_samples:
+        # Format prompt on-the-fly from problem using template (same as evaluate_model.py)
+        formatted_prompt = prompt_template.replace('{question}', example['problem'])
+        prompts.append(formatted_prompt)
+    
+    # Generate responses (same as evaluate_model.py - using vLLM directly)
     print(f"  Generating {num_eval} responses...")
-    prompts = [ex['prompt'] for ex in eval_samples]
     responses = generate_with_vllm(llm, prompts, sampling_params)
     
     # Grade responses and log details
@@ -59,10 +68,12 @@ def evaluate_checkpoint(
     format_correct = 0
     all_results = []
     
-    for i, (ex, response) in enumerate(zip(eval_samples, responses)):
+    for i, (ex, prompt, response) in enumerate(zip(eval_samples, prompts, responses)):
         ground_truth = ex.get('solution', '')
+        problem = ex.get('problem', '')
+        solution = ex.get('solution', '')
         
-        # Use grader to evaluate
+        # Use grader to evaluate (same as evaluate_model.py)
         reward_dict = r1_zero_reward_fn(
             response=response,
             ground_truth=ground_truth,
@@ -73,9 +84,9 @@ def evaluate_checkpoint(
         token_entropy = compute_token_entropy(response, tokenizer)
         response_length = compute_response_length(response, tokenizer)
         
-        # Create result entry
+        # Create result entry (same structure as evaluate_model.py)
         result = {
-            'prompt': ex['prompt'],
+            'prompt': prompt,  # Use the formatted prompt from prompts list
             'response': response,
             'ground_truth': ground_truth,
             'rewards': {
@@ -92,14 +103,16 @@ def evaluate_checkpoint(
         
         # Log detailed information
         logger.log_test_case(
-            prompt=ex['prompt'],
+            prompt=prompt,  # Use the formatted prompt from prompts list
             response=response,
             ground_truth=ground_truth,
             format_reward=reward_dict['format_reward'],
             answer_reward=reward_dict['answer_reward'],
             total_reward=reward_dict['reward'],
             token_entropy=token_entropy,
-            response_length=response_length
+            response_length=response_length,
+            problem=problem,
+            solution=solution
         )
         
         if reward_dict['format_reward'] == 1.0:
@@ -193,6 +206,13 @@ def eval_worker(
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     
+    # Load prompt template (same as evaluate_model.py)
+    import os
+    prompt_template_path = config.data.prompt_file
+    with open(prompt_template_path, 'r') as f:
+        prompt_template = f.read()
+    print(f"✓ Loaded prompt template from {prompt_template_path}")
+    
     # Create sampling parameters
     sampling_params = create_sampling_params(
         temperature=config.evaluation.temperature,
@@ -250,7 +270,7 @@ def eval_worker(
             
             # Run evaluation with detailed logging
             print(f"Running evaluation on {config.evaluation.num_eval_samples} samples...")
-            metrics = evaluate_checkpoint(llm, val_data, sampling_params, config, tokenizer, eval_step)
+            metrics = evaluate_checkpoint(llm, val_data, sampling_params, config, tokenizer, eval_step, prompt_template)
             
             # Log to W&B
             wandb.log({

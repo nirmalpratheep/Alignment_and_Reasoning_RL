@@ -6,21 +6,21 @@ model:
 
 # Training Configuration
 training:
-  learning_rate: 2.0e-5
+  learning_rate: 2.0e-5        # Standard SFT learning rate (range: 1e-5 to 5e-5)
   weight_decay: 0.01
-  batch_size: 32              # Optimal for H100 80GB (~28GB usage)
+  batch_size: 40              # Optimal for H100 80GB (~28GB usage)
   num_epochs: 1
-  gradient_accumulation_steps: 4  # Effective batch = 64
-  warmup_steps: 10            # Reduced for small test run
-  max_batches: 500             # Small test run (20 batches)
-  eval_every: 10              # Evaluate after 10 batches
+  gradient_accumulation_steps: 2  # Effective batch = 80
+  warmup_steps: 100           # 10-20% of total training steps for stability
+  max_batches: 10000          # Use full dataset (MATH has ~7500 train examples)
+  eval_every: 1000             # Evaluate every 500 batches
   device: "cuda:0"
 
 # Evaluation Configuration
 evaluation:
   device: "cuda:1"
   batch_size: 256             # Large batch for fast eval (~40GB usage)
-  num_eval_samples: 50        # Reduced for quick test eval
+  num_eval_samples: 10000     # Use full test dataset (MATH has ~5000 test examples)
   temperature: 1.0
   top_p: 1.0
   max_tokens: 1024

@@ -88,19 +88,23 @@ class DetailedEvaluationLogger:
         answer_reward: float,
         total_reward: float,
         token_entropy: float,
-        response_length: int
+        response_length: int,
+        problem: str = None,
+        solution: str = None
     ):
         """Log a single test case with all details.
         
         Args:
             prompt: Input prompt
             response: Generated response
-            ground_truth: Ground truth answer
+            ground_truth: Ground truth answer (same as solution)
             format_reward: Format reward (0 or 1)
             answer_reward: Answer correctness reward (0 or 1)
             total_reward: Total reward
             token_entropy: Average token entropy
             response_length: Length of response in tokens
+            problem: Original problem/question (optional)
+            solution: Original solution text (optional)
         """
         test_case = {
             "prompt": prompt,
@@ -116,6 +120,12 @@ class DetailedEvaluationLogger:
                 "response_length": response_length
             }
         }
+        
+        # Add problem and solution fields if provided
+        if problem is not None:
+            test_case["problem"] = problem
+        if solution is not None:
+            test_case["solution"] = solution
         
         self.test_cases.append(test_case)
         
