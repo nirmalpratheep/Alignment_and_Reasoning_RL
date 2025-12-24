@@ -40,6 +40,7 @@ def init_vllm(
         seed=seed,
         gpu_memory_utilization=gpu_memory_utilization,
         tensor_parallel_size=tensor_parallel_size,
+        enforce_eager=True,  # Disable torch.compile to avoid memory profiling issues
     )
     
     print(f"✓ vLLM initialized on {device}")
