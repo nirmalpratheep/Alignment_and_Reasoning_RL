@@ -94,19 +94,30 @@ def generate_response(model, tokenizer, prompt: str, max_tokens: int = 1024) -> 
     Returns:
         str: Generated response
     """
-    inputs = tokenizer.encode(prompt, return_tensors="pt").to(DEVICE)
+    # Set pad_token if not set
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Encode with attention mask
+    encoded = tokenizer(prompt, return_tensors="pt", padding=True, truncation=True)
+    input_ids = encoded['input_ids'].to(DEVICE)
+    attention_mask = encoded['attention_mask'].to(DEVICE)
     
     with torch.no_grad():
         outputs = model.generate(
-            inputs,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
             max_new_tokens=max_tokens,
             temperature=0.7,
             top_p=0.9,
             do_sample=True,
-            pad_token_id=tokenizer.eos_token_id
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id=tokenizer.eos_token_id
         )
     
-    response = tokenizer.decode(outputs[0][inputs.shape[1]:], skip_special_tokens=True)
+    # Decode only the generated part (excluding the input prompt)
+    generated_ids = outputs[0][input_ids.shape[1]:]
+    response = tokenizer.decode(generated_ids, skip_special_tokens=True)
     return response.strip()
 
 
@@ -375,8 +386,14 @@ def analyze_format_failures(results: List[Dict], batch_idx: int = 0) -> None:
         print("="*80)
 
 
-def evaluate_batch(batch: List[Dict], val_data: List[Dict]) -> Dict:
-    """Evaluate a batch using validation data and compute metrics"""
+def evaluate_batch(batch: List[Dict], val_data: List[Dict], model, tokenizer, checkpoint_path: str = None) -> Tuple[Dict, List[Dict], List[Dict]]:
+    """Evaluate a batch by generating responses from the model and computing metrics
+    
+    Returns:
+        metrics: Dictionary with evaluation metrics
+        batch_results: List of results with generated responses and rewards for batch
+        val_results: List of results with generated responses and rewards for validation set
+    """
     metrics = {
         'batch_format_reward': 0.0,
         'batch_answer_reward': 0.0,
@@ -385,15 +402,52 @@ def evaluate_batch(batch: List[Dict], val_data: List[Dict]) -> Dict:
         'batch_format_accuracy': 0.0
     }
     
-    # Evaluate batch
+    # Load model from checkpoint if provided
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"  Loading model from checkpoint: {checkpoint_path}")
+        model = AutoModelForCausalLM.from_pretrained(
+            checkpoint_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True
+        )
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
+    
+    # Generate responses for batch
+    print(f"  Generating responses for {len(batch)} batch samples...")
+    batch_prompts = [item['prompt'] for item in batch]
+    batch_responses = []
+    for prompt in tqdm(batch_prompts, desc="  Batch generation"):
+        response = generate_response(model, tokenizer, prompt, max_tokens=1024)
+        batch_responses.append(response)
+    
+    # Grade batch responses and create results
+    batch_results = []
     total_format = 0
     total_answer = 0
     total_reward = 0
     
-    for item in batch:
-        total_format += item.get('format_reward', 0.0)
-        total_answer += item.get('answer_reward', 0.0)
-        total_reward += item.get('reward', 0.0)
+    for i, item in enumerate(batch):
+        generated_response = batch_responses[i]
+        ground_truth_solution = item.get('solution', '')
+        
+        # Grade the generated response
+        reward_dict = r1_zero_reward_fn(response=generated_response, ground_truth=ground_truth_solution, fast=True)
+        
+        # Create result dictionary
+        result = {
+            'problem': item.get('problem', ''),
+            'solution': ground_truth_solution,
+            'response': generated_response,
+            'format_reward': reward_dict.get('format_reward', 0.0),
+            'answer_reward': reward_dict.get('answer_reward', 0.0),
+            'reward': reward_dict.get('reward', 0.0)
+        }
+        batch_results.append(result)
+        
+        total_format += reward_dict.get('format_reward', 0.0)
+        total_answer += reward_dict.get('answer_reward', 0.0)
+        total_reward += reward_dict.get('reward', 0.0)
     
     if len(batch) > 0:
         metrics['batch_format_reward'] = total_format / len(batch)
@@ -402,24 +456,52 @@ def evaluate_batch(batch: List[Dict], val_data: List[Dict]) -> Dict:
         metrics['batch_accuracy'] = total_answer / len(batch)
         metrics['batch_format_accuracy'] = total_format / len(batch)
     
-    # Evaluate on validation set
+    # Evaluate on validation set (sample subset for efficiency)
+    val_sample_size = min(128, len(val_data))
+    val_sample = val_data[:val_sample_size] if len(val_data) > val_sample_size else val_data
+    
+    print(f"  Generating responses for {len(val_sample)} validation samples...")
+    val_prompts = [item['prompt'] for item in val_sample]
+    val_responses = []
+    for prompt in tqdm(val_prompts, desc="  Val generation"):
+        response = generate_response(model, tokenizer, prompt, max_tokens=1024)
+        val_responses.append(response)
+    
+    val_results = []
     val_format = 0
     val_answer = 0
     val_reward = 0
     
-    for item in val_data:
-        val_format += item.get('format_reward', 0.0)
-        val_answer += item.get('answer_reward', 0.0)
-        val_reward += item.get('reward', 0.0)
+    for i, item in enumerate(val_sample):
+        generated_response = val_responses[i]
+        ground_truth_solution = item.get('solution', '')
+        
+        # Grade the generated response
+        reward_dict = r1_zero_reward_fn(response=generated_response, ground_truth=ground_truth_solution, fast=True)
+        
+        # Create result dictionary
+        result = {
+            'problem': item.get('problem', ''),
+            'solution': ground_truth_solution,
+            'response': generated_response,
+            'format_reward': reward_dict.get('format_reward', 0.0),
+            'answer_reward': reward_dict.get('answer_reward', 0.0),
+            'reward': reward_dict.get('reward', 0.0)
+        }
+        val_results.append(result)
+        
+        val_format += reward_dict.get('format_reward', 0.0)
+        val_answer += reward_dict.get('answer_reward', 0.0)
+        val_reward += reward_dict.get('reward', 0.0)
     
-    if len(val_data) > 0:
-        metrics['val_format_reward'] = val_format / len(val_data)
-        metrics['val_answer_reward'] = val_answer / len(val_data)
-        metrics['val_reward'] = val_reward / len(val_data)
-        metrics['val_accuracy'] = val_answer / len(val_data)
-        metrics['val_format_accuracy'] = val_format / len(val_data)
+    if len(val_sample) > 0:
+        metrics['val_format_reward'] = val_format / len(val_sample)
+        metrics['val_answer_reward'] = val_answer / len(val_sample)
+        metrics['val_reward'] = val_reward / len(val_sample)
+        metrics['val_accuracy'] = val_answer / len(val_sample)
+        metrics['val_format_accuracy'] = val_format / len(val_sample)
     
-    return metrics
+    return metrics, batch_results, val_results
 
 
 
@@ -482,23 +564,49 @@ def save_datasets(train_data: List[Dict], val_data: List[Dict], output_dir: str 
 
 
 def run_training_batches(train_data: List[Dict], val_data: List[Dict], 
-                        batch_size: int = 128, num_batches: int = 5) -> None:
+                        batch_size: int = 128, num_batches: int = 5,
+                        model=None, tokenizer=None, checkpoint_path: str = None) -> None:
     """Run training loop with batch evaluation and result categorization"""
     print("\n" + "="*80)
     print("TRAINING WITH BATCH EVALUATION AND RESULT CATEGORIZATION")
     print("="*80)
     
-    batches = create_batches(train_data, batch_size)
+    # Load model from checkpoint if path provided
+    if checkpoint_path and os.path.exists(checkpoint_path):
+        print(f"Loading trained model from: {checkpoint_path}")
+        model = AutoModelForCausalLM.from_pretrained(
+            checkpoint_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True
+        )
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
+        print("✓ Model loaded successfully")
+    elif model is None or tokenizer is None:
+        print("Warning: No model/tokenizer provided and no checkpoint path. Using base model.")
+        model, tokenizer = load_model_and_tokenizer(MODEL_NAME)
+    
+    # Limit evaluation to 50 samples (matching training limit)
+    max_eval_samples = 50
+    eval_train_data = train_data[:max_eval_samples]
+    
+    batches = create_batches(eval_train_data, batch_size)
     num_batches = min(num_batches, len(batches))
     
-    print(f"Running {num_batches} batches (batch_size={batch_size})")
+    print(f"Running {num_batches} batches (batch_size={batch_size}, total_samples={len(eval_train_data)})")
+    
+    all_val_results = []
     
     for batch_idx in range(num_batches):
         batch = batches[batch_idx]
         print(f"\n[Batch {batch_idx + 1}/{num_batches}] Processing {len(batch)} samples...")
         
         # Evaluate current batch and validation set
-        metrics = evaluate_batch(batch, val_data)
+        metrics, batch_results, val_results = evaluate_batch(batch, val_data, model, tokenizer, checkpoint_path=None)
+        
+        # Accumulate validation results (only from first batch to avoid duplicates)
+        if batch_idx == 0:
+            all_val_results = val_results
         
         # Log to wandb
         wandb_log = {
@@ -522,14 +630,14 @@ def run_training_batches(train_data: List[Dict], val_data: List[Dict],
         print(f"  Train - Format: {metrics['batch_format_accuracy']:.3f}, Answer: {metrics['batch_accuracy']:.3f}, Reward: {metrics['batch_reward']:.3f}")
         print(f"  Val   - Format: {metrics['val_format_accuracy']:.3f}, Answer: {metrics['val_accuracy']:.3f}, Reward: {metrics['val_reward']:.3f}")
         
-        # Categorize and analyze batch results
-        analyze_format_failures(batch, batch_idx=batch_idx + 1)
+        # Categorize and analyze batch results (using generated responses)
+        analyze_format_failures(batch_results, batch_idx=batch_idx + 1)
     
-    # Final analysis on validation set
+    # Final analysis on validation set (using generated responses)
     print("\n" + "="*80)
     print("FINAL VALIDATION SET ANALYSIS")
     print("="*80)
-    analyze_format_failures(val_data, batch_idx=0)
+    analyze_format_failures(all_val_results, batch_idx=0)
     
     print("\n" + "="*80)
     print("TRAINING COMPLETED")
@@ -595,7 +703,10 @@ if __name__ == "__main__":
     print("\n" + "="*80)
     print("STEP 5: EVALUATING WITH GRADING METRICS")
     print("="*80)
-    run_training_batches(sft_train_data, sft_val_data, batch_size=128, num_batches=5)
+    # Load the trained model checkpoint
+    checkpoint_path = "results/checkpoints/epoch_1"
+    run_training_batches(sft_train_data, sft_val_data, batch_size=128, num_batches=5,
+                        model=model, tokenizer=tokenizer, checkpoint_path=checkpoint_path)
     
     # Finish wandb
     wandb.finish()
