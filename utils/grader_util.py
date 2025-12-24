@@ -6,7 +6,7 @@ Used across step0, step1, and other evaluation scripts
 from typing import List, Dict, Tuple, Optional
 import logging
 from tqdm import tqdm
-from drgrpo_grader import r1_zero_reward_fn
+from utils.drgrpo_grader import r1_zero_reward_fn
 
 
 class ResultsGrader:

@@ -16,7 +16,7 @@ from vllm import LLM, SamplingParams
 from tqdm import tqdm
 import torch
 
-from drgrpo_grader import r1_zero_reward_fn, extract_answer
+from utils.drgrpo_grader import r1_zero_reward_fn, extract_answer
 
 
 # Setup logging

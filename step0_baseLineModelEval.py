@@ -15,9 +15,9 @@ from vllm import LLM, SamplingParams
 from tqdm import tqdm
 import torch
 
-from drgrpo_grader import r1_zero_reward_fn, extract_answer
-from dataset_loader import MathDatasetLoader
-from grader_util import ResultsGrader, ResultsCategorizer
+from utils.drgrpo_grader import r1_zero_reward_fn, extract_answer
+from utils.dataset_loader import MathDatasetLoader
+from utils.grader_util import ResultsGrader, ResultsCategorizer
 
 
 # Setup logging
