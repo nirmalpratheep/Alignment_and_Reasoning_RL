@@ -8,11 +8,11 @@ model:
 training:
   learning_rate: 2.0e-5
   weight_decay: 0.01
-  batch_size: 16              # Optimal for H100 80GB (~28GB usage)
+  batch_size: 32              # Optimal for H100 80GB (~28GB usage)
   num_epochs: 1
   gradient_accumulation_steps: 4  # Effective batch = 64
   warmup_steps: 10            # Reduced for small test run
-  max_batches: 20             # Small test run (20 batches)
+  max_batches: 500             # Small test run (20 batches)
   eval_every: 10              # Evaluate after 10 batches
   device: "cuda:0"
 

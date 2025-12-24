@@ -99,9 +99,16 @@ def training_loop(
     print("STARTING TRAINING WORKER (GPU 0)")
     print("="*80)
     
-    # Set device
+    # Set device - MUST set CUDA_VISIBLE_DEVICES for GPU isolation
     device = config.training.device
-    torch.cuda.set_device(device)
+    
+    import os
+    if "cuda:" in device:
+        gpu_idx = device.split(":")[-1]
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_idx
+        print(f"✓ Set CUDA_VISIBLE_DEVICES={gpu_idx} for training")
+    
+    torch.cuda.set_device(0)  # Now GPU 0 is the only visible device
     
     # Load model
     print(f"Loading model on {device}...")
@@ -154,9 +161,9 @@ def training_loop(
         
         # Logging
         if train_step % config.logging.log_every == 0:
-            # Log GPU stats
+            # Log GPU stats (use cuda:0 since CUDA_VISIBLE_DEVICES remaps)
             from src.gpu_monitor import log_gpu_stats_to_wandb
-            gpu_stats = log_gpu_stats_to_wandb(device, prefix="train_gpu", step=train_step)
+            gpu_stats = log_gpu_stats_to_wandb("cuda:0", prefix="train_gpu", step=train_step)
             
             wandb.log({
                 "train/loss": loss.item(),

@@ -265,10 +265,10 @@ def eval_worker(
                 "eval_step": eval_step,
             })
             
-            # Log GPU stats
+            # Log GPU stats (use cuda:0 since CUDA_VISIBLE_DEVICES remaps GPU 1)
             from src.gpu_monitor import log_gpu_stats_to_wandb, print_gpu_stats
-            log_gpu_stats_to_wandb(device, prefix="eval_gpu", step=eval_step)
-            print_gpu_stats(device, label="Eval GPU")
+            log_gpu_stats_to_wandb("cuda:0", prefix="eval_gpu", step=eval_step)
+            print_gpu_stats("cuda:0", label="Eval GPU")
             
             print(f"✓ Evaluation complete:")
             print(f"  - Accuracy: {metrics['accuracy']:.3f}")
