@@ -85,6 +85,7 @@ def load_policy_into_vllm_instance(
     """Load policy model weights into vLLM instance.
     
     This function copies the weights from a HuggingFace model into a vLLM instance.
+    Supports both vLLM v0 and v1 APIs.
     
     Args:
         policy: HuggingFace model with trained weights
@@ -92,8 +93,18 @@ def load_policy_into_vllm_instance(
     """
     print("Loading policy weights into vLLM...")
     
-    # Get the underlying model from vLLM
-    vllm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+    # Get the underlying model from vLLM (v1 API)
+    try:
+        # Try v1 API first
+        vllm_model = llm.llm_engine.engine_core.model_executor.driver_worker.model_runner.model
+    except AttributeError:
+        try:
+            # Fallback to v0 API
+            vllm_model = llm.llm_engine.model_executor.driver_worker.model_runner.model
+        except AttributeError as e:
+            raise RuntimeError(
+                f"Unable to access vLLM model. API may have changed. Error: {e}"
+            )
     
     # Copy state dict
     with torch.no_grad():
