@@ -24,8 +24,14 @@ class Config:
         Returns:
             Configuration value
         """
-        if name in self._config:
-            value = self._config[name]
+        # Use object.__getattribute__ to avoid infinite recursion during pickling
+        try:
+            config_dict = object.__getattribute__(self, '_config')
+        except AttributeError:
+            raise AttributeError(f"Config object has no attribute '{name}'")
+        
+        if name in config_dict:
+            value = config_dict[name]
             # Recursively convert nested dicts to Config objects
             if isinstance(value, dict):
                 return Config(value)
