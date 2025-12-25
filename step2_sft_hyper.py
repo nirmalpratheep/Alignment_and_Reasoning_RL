@@ -7,10 +7,14 @@ import sys
 import yaml
 import wandb
 import optuna
+import multiprocessing as mp
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 
+# Set spawn method for CUDA compatibility (must be before any CUDA operations)
+if __name__ == "__main__":
+    mp.set_start_method('spawn', force=True)
 
 # Search space bounds
 LR_MIN, LR_MAX = 5e-6, 1e-4
