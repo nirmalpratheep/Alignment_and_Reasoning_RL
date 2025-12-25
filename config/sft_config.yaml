@@ -19,7 +19,7 @@ training:
 # Evaluation Configuration
 evaluation:
   device: "cuda:1"
-  batch_size: 256             # Large batch for fast eval (~40GB usage)
+  batch_size: 320             # Large batch for fast eval (~40GB usage)
   num_eval_samples: 10000     # Use full test dataset (MATH has ~5000 test examples)
   temperature: 1.0
   top_p: 1.0
