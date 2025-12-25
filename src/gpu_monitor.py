@@ -14,31 +14,39 @@ def get_gpu_memory_stats(device: str = "cuda:0") -> Dict[str, float]:
         Dictionary with memory stats in GB
     """
     if not torch.cuda.is_available():
-        return {"allocated": 0.0, "reserved": 0.0, "max_allocated": 0.0, "free": 0.0, "total": 0.0}
+        return {"allocated_gb": 0.0, "reserved_gb": 0.0, "max_allocated_gb": 0.0, "free_gb": 0.0, "total_gb": 0.0, "utilization_pct": 0.0}
     
-    # Extract device index
-    if "cuda:" in device:
-        device_idx = int(device.split(":")[-1])
-    else:
-        device_idx = 0
-    
-    # Get memory stats
-    allocated = torch.cuda.memory_allocated(device_idx) / (1024**3)  # GB
-    reserved = torch.cuda.memory_reserved(device_idx) / (1024**3)  # GB
-    max_allocated = torch.cuda.max_memory_allocated(device_idx) / (1024**3)  # GB
-    
-    # Get total and free memory
-    total = torch.cuda.get_device_properties(device_idx).total_memory / (1024**3)  # GB
-    free = total - reserved
-    
-    return {
-        "allocated_gb": round(allocated, 2),
-        "reserved_gb": round(reserved, 2),
-        "max_allocated_gb": round(max_allocated, 2),
-        "free_gb": round(free, 2),
-        "total_gb": round(total, 2),
-        "utilization_pct": round((allocated / total) * 100, 1)
-    }
+    try:
+        # Extract device index (always use 0 after CUDA_VISIBLE_DEVICES remapping)
+        if "cuda:" in device:
+            device_idx = int(device.split(":")[-1])
+        else:
+            device_idx = 0
+        
+        # Ensure CUDA is initialized
+        if not torch.cuda.is_initialized():
+            torch.cuda.init()
+        
+        # Get memory stats
+        allocated = torch.cuda.memory_allocated(device_idx) / (1024**3)  # GB
+        reserved = torch.cuda.memory_reserved(device_idx) / (1024**3)  # GB
+        max_allocated = torch.cuda.max_memory_allocated(device_idx) / (1024**3)  # GB
+        
+        # Get total and free memory
+        total = torch.cuda.get_device_properties(device_idx).total_memory / (1024**3)  # GB
+        free = total - reserved
+        
+        return {
+            "allocated_gb": round(allocated, 2),
+            "reserved_gb": round(reserved, 2),
+            "max_allocated_gb": round(max_allocated, 2),
+            "free_gb": round(free, 2),
+            "total_gb": round(total, 2),
+            "utilization_pct": round((allocated / total) * 100, 1) if total > 0 else 0.0
+        }
+    except Exception as e:
+        print(f"⚠ GPU stats error: {e}")
+        return {"allocated_gb": 0.0, "reserved_gb": 0.0, "max_allocated_gb": 0.0, "free_gb": 0.0, "total_gb": 0.0, "utilization_pct": 0.0}
 
 
 def log_gpu_stats_to_wandb(
