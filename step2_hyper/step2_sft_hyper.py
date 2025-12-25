@@ -52,7 +52,7 @@ def create_config(lr: float, batch_size: int, trial_id: int) -> Dict[str, Any]:
         },
         "evaluation": {
             "device": "cuda:1",
-            "batch_size": 256,
+            "batch_size": 320,
             "num_eval_samples": FIXED_CONFIG["num_eval_samples"],
             "temperature": 1.0,
             "top_p": 1.0,

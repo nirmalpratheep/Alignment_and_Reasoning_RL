@@ -56,14 +56,26 @@ The parser correctly extracted answers in all cases. Issues found:
 3. **Among formatted responses (16%), only 17.8% correct** - Needs both format AND math improvement
 4. **Parser/grader verified working correctly** - All issues stem from model outputs
 
-## Files
+## Project Structure
 
 ```
 .
-├── evaluate_model.py           # Evaluation script with logging
-├── drgrpo_grader.py           # Grading functions (from Dr. GRPO)
-├── prompts/rl_zero.prompt     # RL zero prompt template
-└── results/                    # Logs and JSON results
+├── step0_baseline/         # Baseline model evaluation
+│   ├── step0_baseLineModelEval.py
+│   └── evaluate_model.py
+├── step1_sft/              # Supervised Fine-Tuning
+│   ├── step1_sft.py
+│   └── README.md
+├── step2_hyper/            # Hyperparameter optimization
+│   ├── step2_sft_hyper.py
+│   └── README.md
+├── src/                    # Core training/eval modules
+│   ├── training_worker.py
+│   ├── eval_worker.py
+│   └── ...
+├── utils/                  # Utilities (dataset, grader)
+├── config/                 # Configuration files
+└── prompts/                # Prompt templates
 ```
 
 ## Reference
