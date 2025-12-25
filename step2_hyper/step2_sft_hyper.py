@@ -1,6 +1,11 @@
 """
 Hyperparameter Optimization for SFT Training using Optuna
 Uses Bayesian Optimization (TPE) instead of grid search for efficient search.
+
+Architecture:
+- Persistent evaluation worker runs continuously, processing checkpoints from all trials
+- Trials train models and send checkpoints to a shared queue
+- Evaluation worker processes checkpoints and sends results back via result manager
 """
 import os
 import sys
@@ -10,7 +15,14 @@ import optuna
 import multiprocessing as mp
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
+from typing import Dict, Any, Optional
+from collections import defaultdict
+import threading
+import time
+
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 # Set spawn method for CUDA compatibility (must be before any CUDA operations)
 if __name__ == "__main__":
@@ -31,9 +43,20 @@ FIXED_CONFIG = {
 # Number of optimization trials
 N_TRIALS = 15
 
+# Global shared queues for persistent eval worker
+_shared_checkpoint_queue: Optional[mp.Queue] = None
+_shared_result_manager: Optional[mp.Manager] = None
+_shared_result_dict: Optional[dict] = None
+_persistent_eval_process: Optional[mp.Process] = None
+
 
 def create_config(lr: float, batch_size: int, trial_id: int) -> Dict[str, Any]:
-    """Create config dict for a trial."""
+    """Create config dict for a trial.
+    
+    GPU Assignment:
+    - Training: cuda:0 (dedicated for training trials)
+    - Evaluation: cuda:1 (dedicated for persistent eval worker)
+    """
     return {
         "model": {
             "name": "Qwen/Qwen2.5-Math-1.5B",
@@ -48,10 +71,10 @@ def create_config(lr: float, batch_size: int, trial_id: int) -> Dict[str, Any]:
             "warmup_steps": FIXED_CONFIG["warmup_steps"],
             "max_batches": FIXED_CONFIG["max_batches"],
             "eval_every": FIXED_CONFIG["eval_every"],
-            "device": "cuda:0"
+            "device": "cuda:0"  # GPU 0: Dedicated for training
         },
         "evaluation": {
-            "device": "cuda:1",
+            "device": "cuda:1",  # GPU 1: Dedicated for evaluation
             "batch_size": 320,
             "num_eval_samples": FIXED_CONFIG["num_eval_samples"],
             "temperature": 1.0,
@@ -82,6 +105,218 @@ def create_config(lr: float, batch_size: int, trial_id: int) -> Dict[str, Any]:
     }
 
 
+def persistent_eval_worker(
+    checkpoint_queue: mp.Queue,
+    result_dict: dict,
+    eval_config: Dict[str, Any],
+    val_data: list,
+    shutdown_event: mp.Event
+):
+    """Persistent evaluation worker that processes checkpoints from all trials.
+    
+    Simple approach: recreates vLLM instance from each checkpoint.
+    This is more reliable than trying to load weights into existing instances.
+    
+    Args:
+        checkpoint_queue: Queue receiving (trial_id, checkpoint_path) tuples
+        result_dict: Shared dictionary to store results: {trial_id: metrics}
+        eval_config: Evaluation configuration (same for all trials)
+        val_data: Validation dataset
+        shutdown_event: Event to signal when to shutdown
+    """
+    import os
+    from vllm import LLM, SamplingParams
+    from transformers import AutoTokenizer
+    import torch
+    
+    print("="*80)
+    print("STARTING PERSISTENT EVALUATION WORKER (GPU 1)")
+    print("="*80)
+    
+    # Set device for vLLM
+    device = eval_config["evaluation"]["device"]
+    if "cuda:" in device:
+        gpu_idx = device.split(":")[-1]
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_idx
+        print(f"✓ Set CUDA_VISIBLE_DEVICES={gpu_idx} for vLLM")
+    
+    torch.cuda.set_device(0)  # GPU 1 appears as GPU 0 after CUDA_VISIBLE_DEVICES
+    
+    # Load tokenizer
+    tokenizer = AutoTokenizer.from_pretrained(eval_config["model"]["name"], trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Create sampling parameters
+    sampling_params = SamplingParams(
+        temperature=eval_config["evaluation"]["temperature"],
+        top_p=eval_config["evaluation"]["top_p"],
+        max_tokens=eval_config["evaluation"]["max_tokens"],
+        stop=eval_config["generation"]["stop_sequences"],
+        include_stop_str_in_output=eval_config["generation"]["include_stop_str"]
+    )
+    
+    num_eval_samples = min(eval_config["evaluation"]["num_eval_samples"], len(val_data))
+    
+    print("✓ Evaluation worker ready, waiting for checkpoints...")
+    print("="*80)
+    
+    llm = None
+    
+    while not shutdown_event.is_set():
+        try:
+            # Get checkpoint with timeout to check shutdown event
+            try:
+                item = checkpoint_queue.get(timeout=1.0)
+            except:
+                continue  # Timeout, check shutdown event
+            
+            if item is None:  # Shutdown signal
+                break
+            
+            trial_id, checkpoint_path = item
+            print(f"\n[Eval] Processing checkpoint for Trial {trial_id}: {checkpoint_path}")
+            
+            try:
+                # Clean up previous vLLM instance
+                if llm is not None:
+                    del llm
+                    torch.cuda.empty_cache()
+                
+                # Load vLLM from checkpoint (simple approach - recreate each time)
+                load_start = time.time()
+                print(f"Loading vLLM from checkpoint...")
+                # Note: device is controlled via CUDA_VISIBLE_DEVICES (already set above)
+                llm = LLM(
+                    model=checkpoint_path,
+                    dtype="bfloat16" if eval_config["model"]["dtype"] == "bfloat16" else "float16",
+                    gpu_memory_utilization=0.85,
+                )
+                load_time = time.time() - load_start
+                print(f"✓ vLLM loaded from checkpoint (took {load_time:.2f}s)")
+                
+                # Run evaluation
+                print(f"Running evaluation on {num_eval_samples} samples...")
+                
+                # Use the evaluate_checkpoint function for consistency
+                from src.eval_worker import evaluate_checkpoint
+                from src.config_loader import Config
+                from src.analysis_utils import categorize_results, analyze_format_failures
+                import wandb
+                
+                config = Config(eval_config)
+                with open(eval_config["data"]["prompt_file"], 'r') as f:
+                    prompt_template = f.read()
+                
+                metrics = evaluate_checkpoint(
+                    llm, val_data, sampling_params, config, tokenizer, trial_id, prompt_template
+                )
+                
+                # Get categorization data from the saved analysis report
+                # (evaluate_checkpoint saves it but doesn't return it, so we need to recompute or read it)
+                # For now, we'll compute categorization from the metrics we have
+                # Note: This is a simplified version - full categorization is in the saved report
+                total = metrics['num_evaluated']
+                correct_count = metrics['correct']
+                format_correct_count = metrics['format_correct']
+                
+                # Categorization breakdown:
+                # category_1 (correct): format=1, answer=1 = correct_count
+                # category_2 (wrong answer): format=1, answer=0 = format_correct - correct
+                # category_3 (format failure): format=0 = total - format_correct
+                category_1_count = correct_count
+                category_2_count = format_correct_count - correct_count
+                category_3_count = total - format_correct_count
+                
+                # Log to the same wandb run as the training trial
+                # Get the run info for this trial from shared dict
+                run_info_key = "__trial_run_info__"
+                run_info = None
+                if run_info_key in result_dict:
+                    run_info = result_dict[run_info_key].get(trial_id)
+                
+                if run_info:
+                    # Resume/join the existing run using the run ID
+                    wandb.init(
+                        project=run_info.get("project", eval_config.get("logging", {}).get("wandb_project", "math-sft-optuna")),
+                        name=run_info.get("name"),
+                        id=run_info.get("id"),  # Use the stored run ID
+                        resume="allow",  # Resume the existing run
+                        reinit=True
+                    )
+                else:
+                    # Fallback: create new run if info not available yet
+                    # This might happen if eval runs before training sets the info
+                    wandb.init(
+                        project=eval_config.get("logging", {}).get("wandb_project", "math-sft-optuna"),
+                        name=f"trial_{trial_id}",
+                        group="optuna_search",
+                        reinit=True
+                    )
+                
+                wandb.log({
+                    "eval/accuracy": metrics['accuracy'],
+                    "eval/format_accuracy": metrics['format_accuracy'],
+                    "eval/num_correct": metrics['correct'],
+                    "eval/num_format_correct": metrics['format_correct'],
+                    "eval/num_evaluated": metrics['num_evaluated'],
+                    "eval/avg_response_length": metrics['avg_response_length'],
+                    "eval/avg_response_length_correct": metrics['avg_response_length_correct'],
+                    "eval/avg_response_length_incorrect": metrics['avg_response_length_incorrect'],
+                    "eval/avg_token_entropy": metrics['avg_token_entropy'],
+                    # Categorization metrics
+                    "eval/category_1_correct_count": category_1_count,
+                    "eval/category_1_correct_pct": (category_1_count / total * 100) if total > 0 else 0.0,
+                    "eval/category_2_wrong_answer_count": category_2_count,
+                    "eval/category_2_wrong_answer_pct": (category_2_count / total * 100) if total > 0 else 0.0,
+                    "eval/category_3_format_failure_count": category_3_count,
+                    "eval/category_3_format_failure_pct": (category_3_count / total * 100) if total > 0 else 0.0,
+                    "trial_id": trial_id,
+                })
+                
+                wandb.finish()
+                
+                # Store result (include categorization for reference)
+                metrics_with_categorization = {
+                    **metrics,
+                    "categorization": {
+                        "category_1_correct": category_1_count,
+                        "category_2_wrong_answer": category_2_count,
+                        "category_3_format_failure": category_3_count,
+                    }
+                }
+                result_dict[trial_id] = metrics_with_categorization
+                
+                print(f"✓ Evaluation complete for Trial {trial_id}:")
+                print(f"  - Accuracy: {metrics['accuracy']:.3f}")
+                print(f"  - Format Accuracy: {metrics['format_accuracy']:.3f}")
+                print(f"  - Correct: {metrics['correct']}/{metrics['num_evaluated']}")
+                print(f"  - Categorization:")
+                print(f"    * Correct (format+answer): {category_1_count} ({category_1_count/total*100:.1f}%)")
+                print(f"    * Wrong answer (format ok): {category_2_count} ({category_2_count/total*100:.1f}%)")
+                print(f"    * Format failure: {category_3_count} ({category_3_count/total*100:.1f}%)")
+                
+            except Exception as e:
+                print(f"⚠ Error evaluating Trial {trial_id}: {e}")
+                import traceback
+                traceback.print_exc()
+                result_dict[trial_id] = {"accuracy": 0.0, "error": str(e)}
+        
+        except Exception as e:
+            print(f"⚠ Error in eval worker loop: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    # Cleanup
+    if llm is not None:
+        del llm
+        torch.cuda.empty_cache()
+    
+    print("="*80)
+    print("PERSISTENT EVALUATION WORKER STOPPED")
+    print("="*80)
+
+
 def objective(trial: optuna.Trial) -> float:
     """Optuna objective function - returns accuracy to maximize."""
     
@@ -104,21 +339,20 @@ def objective(trial: optuna.Trial) -> float:
         # Import here to avoid multiprocessing issues
         from src.config_loader import load_config, validate_config, Config
         from src.training_worker import training_loop
-        from src.eval_worker import eval_worker
         from utils.dataset_loader import MathDatasetLoader
         from src.data_utils import prepare_sft_dataset
         from transformers import AutoTokenizer
-        import multiprocessing as mp
         import torch
         
         # Load config
         config = load_config(config_path)
         validate_config(config)
         
-        # Initialize W&B
+        # Initialize W&B and store run info for eval worker
+        run_name = f"trial_{trial_id}_lr{lr:.2e}_bs{batch_size}"
         wandb.init(
             project=config_dict["logging"]["wandb_project"],
-            name=f"trial_{trial_id}_lr{lr:.2e}_bs{batch_size}",
+            name=run_name,
             config={
                 "trial_id": trial_id,
                 "learning_rate": lr,
@@ -128,6 +362,18 @@ def objective(trial: optuna.Trial) -> float:
             group="optuna_search",
             reinit=True
         )
+        
+        # Store run name and ID so eval worker can log to the same run
+        if _shared_result_dict is not None:
+            # Use a separate key for run info
+            run_info_key = "__trial_run_info__"
+            if run_info_key not in _shared_result_dict:
+                _shared_result_dict[run_info_key] = {}
+            _shared_result_dict[run_info_key][trial_id] = {
+                "name": run_name,
+                "id": wandb.run.id,  # Store the actual run ID
+                "project": config_dict["logging"]["wandb_project"]
+            }
         
         # Load datasets
         loader = MathDatasetLoader()
@@ -143,32 +389,56 @@ def objective(trial: optuna.Trial) -> float:
             tokenizer.pad_token = tokenizer.eos_token
         
         train_data = prepare_sft_dataset(train_examples, prompt_template)
-        val_data = prepare_sft_dataset(test_examples, prompt_template)
         
-        # Create eval queue and shared value for accuracy
-        eval_queue = mp.Queue(maxsize=2)
+        # Create a dummy eval queue (training_loop expects it but we won't use it)
+        # We'll send checkpoints to the shared queue manually
+        dummy_eval_queue = mp.Queue(maxsize=1)
         
-        # Start eval worker
-        eval_process = mp.Process(
-            target=eval_worker,
-            args=(eval_queue, config, val_data),
-            name=f"EvalWorker-Trial{trial_id}"
-        )
-        eval_process.start()
+        # Run training (this saves checkpoints but doesn't send them to eval_queue)
+        training_loop(config, train_data, tokenizer, dummy_eval_queue)
         
-        # Run training
-        training_loop(config, train_data, tokenizer, eval_queue)
+        # Find final checkpoint and send to shared eval queue
+        final_step = FIXED_CONFIG['max_batches']
+        final_checkpoint_path = Path(config.checkpointing.temp_dir) / f"step_{final_step}"
         
-        # Wait for eval worker
-        if eval_process.is_alive():
-            eval_queue.put(None)
-            eval_process.join(timeout=120)
-            if eval_process.is_alive():
-                eval_process.terminate()
+        if final_checkpoint_path.exists():
+            print(f"\nSending final checkpoint to shared eval worker: {final_checkpoint_path}")
+            _shared_checkpoint_queue.put((trial_id, str(final_checkpoint_path)))
+        else:
+            # Fallback: try output_dir/final
+            fallback_path = Path(config.checkpointing.output_dir) / "final"
+            if fallback_path.exists():
+                print(f"\nSending final checkpoint to shared eval worker (fallback): {fallback_path}")
+                _shared_checkpoint_queue.put((trial_id, str(fallback_path)))
+            else:
+                print(f"⚠ Final checkpoint not found at {final_checkpoint_path} or {fallback_path}")
+                print("  Evaluation will be skipped")
+                _shared_result_dict[trial_id] = {"accuracy": 0.0, "error": "Checkpoint not found"}
         
-        # Get final accuracy from W&B (simplified - use last logged value)
-        # In practice, you'd track this properly
-        final_accuracy = wandb.run.summary.get("eval/accuracy", 0.0)
+        # Wait for evaluation result
+        final_accuracy = 0.0
+        max_wait_time = 300  # 5 minutes
+        wait_interval = 2  # Check every 2 seconds
+        waited = 0
+        
+        print(f"\nWaiting for evaluation result (timeout: {max_wait_time}s)...")
+        while waited < max_wait_time:
+            if trial_id in _shared_result_dict:
+                result = _shared_result_dict[trial_id]
+                final_accuracy = result.get("accuracy", 0.0)
+                if "error" in result:
+                    print(f"⚠ Evaluation had error: {result['error']}")
+                print(f"✓ Received evaluation result: accuracy={final_accuracy:.4f}")
+                break
+            time.sleep(wait_interval)
+            waited += wait_interval
+            if waited % 10 == 0:
+                print(f"  Still waiting... ({waited}/{max_wait_time}s)")
+        
+        if waited >= max_wait_time and trial_id not in _shared_result_dict:
+            print(f"⚠ Timeout waiting for evaluation result")
+            print("  Using default accuracy of 0.0")
+            _shared_result_dict[trial_id] = {"accuracy": 0.0, "error": "Timeout"}
         
         wandb.finish()
         
@@ -180,7 +450,12 @@ def objective(trial: optuna.Trial) -> float:
         
     except Exception as e:
         print(f"⚠ Trial {trial_id} failed: {e}")
+        import traceback
+        traceback.print_exc()
         wandb.finish()
+        # Mark as failed in result dict
+        if _shared_result_dict is not None:
+            _shared_result_dict[trial_id] = {"accuracy": 0.0, "error": str(e)}
         raise optuna.TrialPruned()
     
     finally:
@@ -190,11 +465,13 @@ def objective(trial: optuna.Trial) -> float:
 
 
 def main():
-    """Run Optuna hyperparameter optimization."""
+    """Run Optuna hyperparameter optimization with persistent eval worker."""
+    global _shared_checkpoint_queue, _shared_result_manager, _shared_result_dict, _persistent_eval_process
     
     print("="*80)
     print("SFT HYPERPARAMETER OPTIMIZATION (Optuna TPE)")
     print("="*80)
+    print(f"\nArchitecture: Persistent evaluation worker + training trials")
     print(f"\nSearch space:")
     print(f"  - Learning rate: [{LR_MIN:.0e}, {LR_MAX:.0e}] (log scale)")
     print(f"  - Batch size: {BATCH_SIZE_CHOICES}")
@@ -211,6 +488,78 @@ def main():
     Path("results/optuna").mkdir(parents=True, exist_ok=True)
     Path("config").mkdir(parents=True, exist_ok=True)
     
+    # Load validation data once (shared across all trials)
+    print("\n" + "="*80)
+    print("LOADING VALIDATION DATA (shared across all trials)")
+    print("="*80)
+    from utils.dataset_loader import MathDatasetLoader
+    from src.data_utils import prepare_sft_dataset
+    
+    loader = MathDatasetLoader()
+    loader.load_all_subsets()
+    test_examples = loader.collect_test_examples()
+    
+    with open("prompts/rl_zero.prompt", 'r') as f:
+        prompt_template = f.read()
+    
+    val_data = prepare_sft_dataset(test_examples, prompt_template)
+    print(f"✓ Loaded {len(val_data)} validation samples")
+    
+    # Create evaluation config (same for all trials)
+    # GPU 1 is dedicated for the persistent evaluation worker
+    eval_config = {
+        "model": {
+            "name": "Qwen/Qwen2.5-Math-1.5B",
+            "dtype": "bfloat16"
+        },
+        "logging": {
+            "wandb_project": "math-sft-optuna",
+            "wandb_entity": None,
+        },
+        "evaluation": {
+            "device": "cuda:1",  # GPU 1: Dedicated for persistent eval worker
+            "batch_size": 320,
+            "num_eval_samples": FIXED_CONFIG["num_eval_samples"],
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "max_tokens": 1024
+        },
+        "generation": {
+            "temperature": 1.0,
+            "top_p": 1.0,
+            "max_tokens": 1024,
+            "stop_sequences": ["</answer>"],
+            "include_stop_str": True
+        },
+        "data": {
+            "prompt_file": "prompts/rl_zero.prompt",
+            "train_val_split": 0.8
+        }
+    }
+    
+    # Create shared queues and manager
+    print("\n" + "="*80)
+    print("SETTING UP PERSISTENT EVALUATION WORKER")
+    print("="*80)
+    manager = mp.Manager()
+    _shared_checkpoint_queue = manager.Queue(maxsize=10)  # Queue for (trial_id, checkpoint_path)
+    _shared_result_dict = manager.dict()  # Shared dict: {trial_id: metrics}
+    _shared_result_manager = manager
+    
+    shutdown_event = mp.Event()
+    
+    # Start persistent eval worker
+    _persistent_eval_process = mp.Process(
+        target=persistent_eval_worker,
+        args=(_shared_checkpoint_queue, _shared_result_dict, eval_config, val_data, shutdown_event),
+        name="PersistentEvalWorker"
+    )
+    _persistent_eval_process.start()
+    print("✓ Persistent evaluation worker started")
+    
+    # Give eval worker time to initialize
+    time.sleep(3)
+    
     # Create Optuna study
     study = optuna.create_study(
         study_name="sft_hyperparam_search",
@@ -219,18 +568,51 @@ def main():
         pruner=optuna.pruners.MedianPruner(n_warmup_steps=3)
     )
     
-    # Run optimization
-    study.optimize(
-        objective,
-        n_trials=N_TRIALS,
-        show_progress_bar=True,
-        catch=(Exception,)
-    )
+    try:
+        # Run optimization
+        print("\n" + "="*80)
+        print("STARTING OPTUNA OPTIMIZATION")
+        print("="*80)
+        study.optimize(
+            objective,
+            n_trials=N_TRIALS,
+            show_progress_bar=True,
+            catch=(Exception,)
+        )
+    finally:
+        # Shutdown eval worker
+        print("\n" + "="*80)
+        print("SHUTTING DOWN EVALUATION WORKER")
+        print("="*80)
+        shutdown_event.set()
+        # Send None to queue to wake up worker
+        _shared_checkpoint_queue.put(None)
+        
+        if _persistent_eval_process.is_alive():
+            _persistent_eval_process.join(timeout=120)
+            if _persistent_eval_process.is_alive():
+                print("⚠ Eval worker did not terminate, forcing termination...")
+                _persistent_eval_process.terminate()
+                _persistent_eval_process.join(timeout=10)
+        print("✓ Evaluation worker stopped")
     
     # Results
     print("\n" + "="*80)
     print("OPTIMIZATION COMPLETE")
     print("="*80)
+    
+    # Check if any trials completed successfully
+    completed_trials = [t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE]
+    
+    if len(completed_trials) == 0:
+        print("\n⚠ WARNING: No trials completed successfully!")
+        print("\nTrial states:")
+        for trial in study.trials:
+            print(f"  Trial {trial.number}: {trial.state}")
+            if trial.state == optuna.trial.TrialState.FAIL:
+                print(f"    Error: {trial.system_attrs.get('error', 'Unknown error')}")
+        print("\nPlease check the error messages above and fix the issues.")
+        return
     
     print(f"\nBest trial: {study.best_trial.number}")
     print(f"Best accuracy: {study.best_value:.4f}")
@@ -246,7 +628,7 @@ def main():
             "best_accuracy": float(study.best_value),
             "best_params": study.best_params,
             "n_trials": len(study.trials),
-            "completed_trials": len([t for t in study.trials if t.state == optuna.trial.TrialState.COMPLETE])
+            "completed_trials": len(completed_trials)
         }, f)
     
     print(f"\nResults saved to: {results_path}")

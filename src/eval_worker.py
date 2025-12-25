@@ -169,7 +169,8 @@ def eval_worker(
     queue: mp.Queue,
     config: Config,
     val_data: list,
-    seed: int = 42
+    seed: int = 42,
+    result_queue: mp.Queue = None
 ) -> None:
     """Evaluation worker process on GPU 1.
     
@@ -181,6 +182,7 @@ def eval_worker(
         config: Configuration object
         val_data: Validation dataset
         seed: Random seed
+        result_queue: Optional queue to send final metrics back to main process
     """
     from transformers import AutoTokenizer
     from vllm import LLM
@@ -293,10 +295,17 @@ def eval_worker(
             print(f"  - Avg Response Length: {metrics['avg_response_length']:.1f}")
             print(f"  - Avg Token Entropy: {metrics['avg_token_entropy']:.3f}")
             
+            # Send metrics to result queue if provided (for hyperparameter optimization)
+            if result_queue is not None:
+                result_queue.put(metrics)
+            
         except Exception as e:
             print(f"⚠ Error during evaluation: {e}")
             import traceback
             traceback.print_exc()
+            # Send error signal to result queue
+            if result_queue is not None:
+                result_queue.put({"accuracy": 0.0, "error": str(e)})
         
         eval_step += 1
     

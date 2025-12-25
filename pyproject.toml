@@ -19,6 +19,7 @@ dependencies = [
     "wandb>=0.23.1",
     "vllm>=0.13.0",
     "matplotlib>=3.10.8",
+    "optuna>=4.6.0",
 ]
 
 [project.optional-dependencies]
