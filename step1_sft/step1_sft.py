@@ -5,8 +5,9 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-# Add src to path
-sys.path.insert(0, str(Path(__file__).parent / "src"))
+# Add project root to path for imports
+project_root = Path(__file__).parent.parent
+sys.path.insert(0, str(project_root))
 
 from src.config_loader import load_config, validate_config
 from src.training_worker import training_loop
@@ -87,7 +88,16 @@ def main():
         notes=f"Dual-GPU SFT training - {timestamp}",
         tags=["sft", "math", "dual-gpu", "bfloat16"]
     )
-    print(f"✓ W&B initialized: {run_name}\n")
+    
+    # Store wandb run info to pass to eval worker
+    wandb_run_info = {
+        "name": run_name,
+        "id": wandb.run.id,
+        "project": config.logging.wandb_project,
+        "entity": config.logging.wandb_entity
+    }
+    
+    print(f"✓ W&B initialized: {run_name} (ID: {wandb.run.id})\n")
     
     # Load datasets
     train_data, val_data, tokenizer = load_datasets(config)
@@ -102,7 +112,7 @@ def main():
     
     eval_process = mp.Process(
         target=eval_worker,
-        args=(eval_queue, config, val_data),
+        args=(eval_queue, config, val_data, 42, None, wandb_run_info),  # Pass wandb run info
         name="EvalWorker-GPU1"
     )
     eval_process.start()
@@ -133,13 +143,19 @@ def main():
             eval_queue.put(None)
         
         # Wait for eval worker to finish
+        # Give it plenty of time - it needs to process all checkpoints
         print("Waiting for evaluation worker to finish...")
-        eval_process.join(timeout=30)
+        print("  (This may take a while as it processes all checkpoints)")
+        eval_process.join(timeout=600)  # 10 minutes timeout - eval can take time
         
         if eval_process.is_alive():
-            print("⚠ Evaluation worker didn't stop, terminating...")
+            print("⚠ Evaluation worker didn't stop within timeout, terminating...")
             eval_process.terminate()
-            eval_process.join()
+            eval_process.join(timeout=30)
+            if eval_process.is_alive():
+                print("⚠ Force killing eval worker...")
+                eval_process.kill()
+                eval_process.join()
         
         print("✓ All processes stopped")
         

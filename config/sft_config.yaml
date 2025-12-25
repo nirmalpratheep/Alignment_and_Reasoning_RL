@@ -6,9 +6,9 @@ model:
 
 # Training Configuration
 training:
-  learning_rate: 2.0e-5        # Standard SFT learning rate (range: 1e-5 to 5e-5)
+  learning_rate: 7.98e-06        # Standard SFT learning rate (range: 1e-5 to 5e-5)
   weight_decay: 0.01
-  batch_size: 128              # Optimal for H100 80GB (~28GB usage)
+  batch_size: 256              # Optimal for H100 80GB (~28GB usage)
   num_epochs: 1
   gradient_accumulation_steps: 2  # Effective batch = 80
   warmup_steps: 100           # 10-20% of total training steps for stability

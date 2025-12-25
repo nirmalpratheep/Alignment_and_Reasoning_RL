@@ -170,7 +170,8 @@ def eval_worker(
     config: Config,
     val_data: list,
     seed: int = 42,
-    result_queue: mp.Queue = None
+    result_queue: mp.Queue = None,
+    wandb_run_info: dict = None
 ) -> None:
     """Evaluation worker process on GPU 1.
     
@@ -183,6 +184,7 @@ def eval_worker(
         val_data: Validation dataset
         seed: Random seed
         result_queue: Optional queue to send final metrics back to main process
+        wandb_run_info: Optional dict with wandb run info (name, id, project, entity) to log to same run
     """
     from transformers import AutoTokenizer
     from vllm import LLM
@@ -225,13 +227,31 @@ def eval_worker(
     )
     
     # Initialize W&B in this process (required for multiprocessing)
-    wandb.init(
-        project=config.logging.wandb_project,
-        name=f"eval-worker-{wandb.util.generate_id()}",
-        group="dual-gpu-training",
-        job_type="evaluation",
-        reinit=True
-    )
+    # If wandb_run_info is provided, resume the same run; otherwise create new one
+    try:
+        if wandb_run_info:
+            wandb.init(
+                project=wandb_run_info.get("project", config.logging.wandb_project),
+                entity=wandb_run_info.get("entity", config.logging.wandb_entity),
+                name=wandb_run_info.get("name"),
+                id=wandb_run_info.get("id"),  # Use the stored run ID
+                resume="allow",  # Resume the existing run
+                reinit=True,
+                settings=wandb.Settings(start_method="thread")  # Use thread instead of spawn for faster init
+            )
+        else:
+            # Fallback: create separate run if info not provided
+            wandb.init(
+                project=config.logging.wandb_project,
+                name=f"eval-worker-{wandb.util.generate_id()}",
+                group="dual-gpu-training",
+                job_type="evaluation",
+                reinit=True
+            )
+    except Exception as e:
+        print(f"⚠ Warning: Failed to initialize wandb in eval worker: {e}")
+        print("  Continuing without wandb logging in eval worker...")
+        # Continue without wandb - evaluation will still work, just won't log
     
     print("✓ Evaluation worker ready")
     print("="*80)
@@ -274,19 +294,46 @@ def eval_worker(
             print(f"Running evaluation on {config.evaluation.num_eval_samples} samples...")
             metrics = evaluate_checkpoint(llm, val_data, sampling_params, config, tokenizer, eval_step, prompt_template)
             
-            # Log to W&B
-            wandb.log({
-                "eval/accuracy": metrics['accuracy'],
-                "eval/format_accuracy": metrics['format_accuracy'],
-                "eval/num_correct": metrics['correct'],
-                "eval/num_format_correct": metrics['format_correct'],
-                "eval/avg_response_length": metrics['avg_response_length'],
-                "eval/avg_response_length_correct": metrics['avg_response_length_correct'],
-                "eval/avg_response_length_incorrect": metrics['avg_response_length_incorrect'],
-                "eval/avg_token_entropy": metrics['avg_token_entropy'],
-                "eval_step": eval_step,
-            })
+            # Compute categorization breakdown
+            total = metrics['num_evaluated']
+            correct_count = metrics['correct']
+            format_correct_count = metrics['format_correct']
             
+            # Categorization breakdown:
+            # category_1 (correct): format=1, answer=1 = correct_count
+            # category_2 (wrong answer): format=1, answer=0 = format_correct - correct
+            # category_3 (format failure): format=0 = total - format_correct
+            category_1_count = correct_count
+            category_2_count = format_correct_count - correct_count
+            category_3_count = total - format_correct_count
+            
+            # Log to W&B (same run as training) - only if wandb is initialized
+            try:
+                if wandb.run is not None:
+                    wandb.log({
+                        "eval/accuracy": metrics['accuracy'],
+                        "eval/format_accuracy": metrics['format_accuracy'],
+                        "eval/num_correct": metrics['correct'],
+                        "eval/num_format_correct": metrics['format_correct'],
+                        "eval/num_evaluated": metrics['num_evaluated'],
+                        "eval/avg_response_length": metrics['avg_response_length'],
+                        "eval/avg_response_length_correct": metrics['avg_response_length_correct'],
+                        "eval/avg_response_length_incorrect": metrics['avg_response_length_incorrect'],
+                        "eval/avg_token_entropy": metrics['avg_token_entropy'],
+                        # Categorization metrics
+                        "eval/category_1_correct_count": category_1_count,
+                        "eval/category_1_correct_pct": (category_1_count / total * 100) if total > 0 else 0.0,
+                        "eval/category_2_wrong_answer_count": category_2_count,
+                        "eval/category_2_wrong_answer_pct": (category_2_count / total * 100) if total > 0 else 0.0,
+                        "eval/category_3_format_failure_count": category_3_count,
+                        "eval/category_3_format_failure_pct": (category_3_count / total * 100) if total > 0 else 0.0,
+                        "eval_step": eval_step,
+                    })
+                else:
+                    print("  (Skipping wandb logging - not initialized)")
+            except Exception as e:
+                print(f"  ⚠ Warning: Failed to log to wandb: {e}")
+                print("  Continuing without wandb logging...")
             
             print(f"✓ Evaluation complete:")
             print(f"  - Accuracy: {metrics['accuracy']:.3f}")
