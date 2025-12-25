@@ -19,9 +19,9 @@ BATCH_SIZE_CHOICES = [128, 256, 512, 1024]
 # Fixed parameters
 FIXED_CONFIG = {
     "max_batches": 200,
-    "eval_every": 50,
+    "eval_every": 999999,    # Only eval at end (final checkpoint only)
     "warmup_steps": 20,
-    "num_eval_samples": 500,
+    "num_eval_samples": 200,
 }
 
 # Number of optimization trials
