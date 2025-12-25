@@ -227,39 +227,53 @@ def eval_worker(
     )
     
     # Initialize W&B in this process (required for multiprocessing)
-    # If wandb_run_info is provided, resume the same run; otherwise create new one
+    # If wandb_run_info is provided, try to resume the same run; if that fails, create a new run for eval
     wandb_initialized = False
     if wandb_run_info:
         print(f"Initializing wandb to resume run: {wandb_run_info.get('name')} (ID: {wandb_run_info.get('id')})")
-        # Try multiple approaches to initialize wandb
-        for attempt in range(3):
+        # Try to resume the training run
+        try:
+            wandb.init(
+                project=wandb_run_info.get("project", config.logging.wandb_project),
+                entity=wandb_run_info.get("entity", config.logging.wandb_entity),
+                name=wandb_run_info.get("name"),
+                id=wandb_run_info.get("id"),  # Use the stored run ID
+                resume="allow",  # Resume the existing run
+                reinit=True,
+                settings=wandb.Settings(init_timeout=120)  # 2 minute timeout
+            )
+            # Verify wandb is actually initialized
+            if wandb.run is not None:
+                wandb_initialized = True
+                print(f"✓ Wandb initialized successfully - resuming training run")
+                print(f"  Run ID: {wandb.run.id}, Run name: {wandb.run.name}")
+            else:
+                print(f"⚠ Wandb.init() returned but wandb.run is None")
+                raise Exception("wandb.run is None after init")
+        except Exception as e:
+            print(f"⚠ Warning: Failed to resume training run: {e}")
+            print("  Creating new wandb run for evaluation...")
+            # Fallback: create a new run for evaluation
             try:
+                eval_run_name = f"{wandb_run_info.get('name')}-eval"
                 wandb.init(
                     project=wandb_run_info.get("project", config.logging.wandb_project),
                     entity=wandb_run_info.get("entity", config.logging.wandb_entity),
-                    name=wandb_run_info.get("name"),
-                    id=wandb_run_info.get("id"),  # Use the stored run ID
-                    resume="allow",  # Resume the existing run
-                    reinit=True
+                    name=eval_run_name,
+                    group="dual-gpu-training",
+                    job_type="evaluation",
+                    reinit=True,
+                    settings=wandb.Settings(init_timeout=120)
                 )
-                # Verify wandb is actually initialized
                 if wandb.run is not None:
                     wandb_initialized = True
-                    print(f"✓ Wandb initialized successfully in eval worker (attempt {attempt + 1})")
-                    print(f"  Run ID: {wandb.run.id}, Run name: {wandb.run.name}")
-                    break
+                    print(f"✓ Wandb initialized with new eval run: {eval_run_name}")
+                    print(f"  Run ID: {wandb.run.id}")
                 else:
-                    print(f"⚠ Wandb.init() returned but wandb.run is None (attempt {attempt + 1})")
-            except Exception as e:
-                if attempt < 2:
-                    print(f"⚠ Attempt {attempt + 1} failed: {e}, retrying...")
-                    import time
-                    time.sleep(2)  # Wait 2 seconds before retry
-                else:
-                    print(f"⚠ Warning: Failed to initialize wandb after 3 attempts: {e}")
-                    print("  Continuing without wandb logging in eval worker...")
-                    import traceback
-                    traceback.print_exc()
+                    print(f"⚠ Failed to create new eval run - continuing without wandb")
+            except Exception as e2:
+                print(f"⚠ Warning: Failed to create new eval run: {e2}")
+                print("  Continuing without wandb logging")
     else:
         # Fallback: create separate run if info not provided
         try:
@@ -268,7 +282,8 @@ def eval_worker(
                 name=f"eval-worker-{wandb.util.generate_id()}",
                 group="dual-gpu-training",
                 job_type="evaluation",
-                reinit=True
+                reinit=True,
+                settings=wandb.Settings(init_timeout=3600)  # 1 hour timeout (effectively no timeout)
             )
             wandb_initialized = True
             print("✓ Wandb initialized (separate run)")
@@ -276,7 +291,10 @@ def eval_worker(
             print(f"⚠ Warning: Failed to initialize wandb: {e}")
             print("  Continuing without wandb logging...")
     
-    print("✓ Evaluation worker ready")
+    if wandb_initialized:
+        print("✓ Evaluation worker ready (wandb initialized)")
+    else:
+        print("⚠ Evaluation worker ready (wandb NOT initialized - will continue without logging)")
     print("="*80)
     
     eval_step = 0
@@ -284,7 +302,7 @@ def eval_worker(
     
     # Main evaluation loop
     while True:
-        # Wait for checkpoint path from queue
+        # Wait for checkpoint path from queue (blocking - will wait until checkpoint arrives)
         print(f"\n[Eval Step {eval_step}] Waiting for checkpoint...")
         checkpoint_path = queue.get()
         
