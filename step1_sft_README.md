@@ -1,27 +1,30 @@
 # SFT Training Results - Qwen 2.5 Math 1.5B
 
-## Performance: Baseline vs SFT
+## Performance: Baseline vs Final SFT
 
-| Metric | Baseline | SFT (500 steps) | Improvement |
-|--------|----------|-----------------|-------------|
-| **Overall Accuracy** | 2.84% | 15.2% | +12.36% |
-| **Format Accuracy** | 16.0% | 89.4% | +73.4% |
-| **Wrong Answer Rate** | 13.1% | 74.2% | - |
-| **Format Failure Rate** | 84.0% | 10.6% | -73.4% |
+| Metric | Baseline | Final SFT (Step 6) | Improvement |
+|--------|----------|-------------------|-------------|
+| **Overall Accuracy** | 2.84% | 7.88% | +5.04% |
+| **Format Accuracy** | 16.0% | 26.46% | +10.46% |
+| **Wrong Answer Rate** | 13.14% | 18.58% | +5.44% |
+| **Format Failure Rate** | 84.02% | 73.54% | -10.48% |
+| **Correct Count** | 142/5000 | 394/5000 | +252 |
+| **Format Correct Count** | 799/5000 | 1323/5000 | +524 |
 
 ## Training Progression
 
-```
-Step   Loss    Accuracy   Format Acc
-─────────────────────────────────────
-   0   2.891     2.8%       16.0%
-  50   1.245     5.6%       42.3%
- 100   0.892     8.2%       61.5%
- 200   0.654    11.4%       78.2%
- 300   0.521    13.1%       84.6%
- 400   0.448    14.3%       87.1%
- 500   0.412    15.2%       89.4%
-```
+Evaluation performed every 1000 training steps on 5000 test samples:
+
+| Eval Step | Training Steps | Accuracy | Format Accuracy | Wrong Answer | Format Failure |
+|-----------|----------------|----------|-----------------|--------------|----------------|
+| Baseline | 0 | 2.84% | 16.0% | 13.14% | 84.02% |
+| 0 | 0 | 5.4% | 15.52% | 10.12% | 84.48% |
+| 1 | 1000 | 6.14% | 21.8% | 15.66% | 78.2% |
+| 2 | 2000 | 6.62% | 24.52% | 17.9% | 75.48% |
+| 3 | 3000 | 7.72% | 26.6% | 18.88% | 73.4% |
+| 4 | 4000 | 7.7% | 26.88% | 19.18% | 73.12% |
+| 5 | 5000 | 7.5% | 26.52% | 19.02% | 73.48% |
+| 6 (Final) | 6000 | 7.88% | 26.46% | 18.58% | 73.54% |
 
 ## Architecture
 
@@ -44,14 +47,51 @@ Step   Loss    Accuracy   Format Acc
 
 ## Configuration
 
-- **Batch size**: 32 (effective: 128 with grad accum)
+- **Batch size**: 128 (effective: 256 with grad accum)
 - **Learning rate**: 2e-5
-- **Steps**: 500
-- **Eval frequency**: Every 10 steps
+- **Total training steps**: 6000
+- **Eval frequency**: Every 1000 steps
+- **Evaluation samples**: 5000 (full test set)
 
-## Key Findings
+## Detailed Analysis
 
-1. **Format learning is fast**: 89% format accuracy by step 500
-2. **Math reasoning improves slowly**: Only 15% correct answers
-3. **Bottleneck shifted**: From format failure (84%→11%) to wrong answers (13%→74%)
-4. **Next step**: RL (GRPO/PPO) for mathematical reasoning improvement
+### Response Characteristics
+
+| Metric | Baseline | Final SFT | Change |
+|--------|----------|-----------|--------|
+| **Avg Response Length** | N/A | 271.9 tokens | - |
+| **Avg Length (Correct)** | N/A | 142.1 tokens | - |
+| **Avg Length (Incorrect)** | N/A | 283.0 tokens | - |
+| **Avg Token Entropy** | N/A | 6.15 | - |
+
+### Format Failure Analysis (Final Step)
+
+The primary issue remains **incomplete generation** (85.7% of format failures):
+- **Missing `</think>` tag**: 78.2% of format failures
+- **Missing `<answer>` tag**: 61.6% of format failures  
+- **Missing `</answer>` tag**: 85.7% of format failures
+- **Wrong order**: 3.5% of format failures
+- **Incomplete generation**: 85.7% of format failures (model runs out of tokens)
+
+### Key Findings
+
+1. **Significant improvement in accuracy**: 2.84% → 7.88% (+5.04% absolute, +177% relative)
+2. **Format accuracy improved**: 16.0% → 26.46% (+10.46% absolute, +65% relative)
+3. **Format failures still dominant**: 73.54% of responses fail format requirements
+4. **Wrong answers increased**: From 10.12% to 18.58% (more responses pass format but are incorrect)
+5. **Incomplete generation is the main bottleneck**: 85.7% of format failures are due to incomplete responses (likely hitting max_tokens=1024 limit)
+6. **Correct answers are shorter**: Average 142 tokens vs 283 tokens for incorrect answers
+
+### Conclusions
+
+1. **Format learning is moderate**: 26% format accuracy achieved, but still far from target
+2. **Math reasoning improves slowly**: Only 7.88% correct answers after 6000 steps
+3. **Bottleneck analysis**: 
+   - Format failures: 73.54% (down from 84.02%)
+   - Wrong answers: 18.58% (up from 13.14%)
+   - The shift indicates format learning is happening, but reasoning quality needs improvement
+4. **Generation length constraint**: Most format failures are incomplete generations, suggesting max_tokens=1024 may be limiting
+5. **Next steps**: 
+   - Consider increasing max_tokens for evaluation
+   - RL (GRPO/PPO) for mathematical reasoning improvement
+   - Continue SFT with more data or longer training

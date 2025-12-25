@@ -127,7 +127,9 @@ def objective(trial: optuna.Trial) -> float:
         
         # Load datasets
         loader = MathDatasetLoader()
-        train_examples, test_examples = loader.load_dataset()
+        loader.load_all_subsets()  # Load all subsets
+        train_examples = loader.collect_train_examples()
+        test_examples = loader.collect_test_examples()
         
         with open(config_dict["data"]["prompt_file"], 'r') as f:
             prompt_template = f.read()
