@@ -228,19 +228,41 @@ def eval_worker(
     
     # Initialize W&B in this process (required for multiprocessing)
     # If wandb_run_info is provided, resume the same run; otherwise create new one
-    try:
-        if wandb_run_info:
-            wandb.init(
-                project=wandb_run_info.get("project", config.logging.wandb_project),
-                entity=wandb_run_info.get("entity", config.logging.wandb_entity),
-                name=wandb_run_info.get("name"),
-                id=wandb_run_info.get("id"),  # Use the stored run ID
-                resume="allow",  # Resume the existing run
-                reinit=True,
-                settings=wandb.Settings(start_method="thread")  # Use thread instead of spawn for faster init
-            )
-        else:
-            # Fallback: create separate run if info not provided
+    wandb_initialized = False
+    if wandb_run_info:
+        print(f"Initializing wandb to resume run: {wandb_run_info.get('name')} (ID: {wandb_run_info.get('id')})")
+        # Try multiple approaches to initialize wandb
+        for attempt in range(3):
+            try:
+                wandb.init(
+                    project=wandb_run_info.get("project", config.logging.wandb_project),
+                    entity=wandb_run_info.get("entity", config.logging.wandb_entity),
+                    name=wandb_run_info.get("name"),
+                    id=wandb_run_info.get("id"),  # Use the stored run ID
+                    resume="allow",  # Resume the existing run
+                    reinit=True
+                )
+                # Verify wandb is actually initialized
+                if wandb.run is not None:
+                    wandb_initialized = True
+                    print(f"✓ Wandb initialized successfully in eval worker (attempt {attempt + 1})")
+                    print(f"  Run ID: {wandb.run.id}, Run name: {wandb.run.name}")
+                    break
+                else:
+                    print(f"⚠ Wandb.init() returned but wandb.run is None (attempt {attempt + 1})")
+            except Exception as e:
+                if attempt < 2:
+                    print(f"⚠ Attempt {attempt + 1} failed: {e}, retrying...")
+                    import time
+                    time.sleep(2)  # Wait 2 seconds before retry
+                else:
+                    print(f"⚠ Warning: Failed to initialize wandb after 3 attempts: {e}")
+                    print("  Continuing without wandb logging in eval worker...")
+                    import traceback
+                    traceback.print_exc()
+    else:
+        # Fallback: create separate run if info not provided
+        try:
             wandb.init(
                 project=config.logging.wandb_project,
                 name=f"eval-worker-{wandb.util.generate_id()}",
@@ -248,10 +270,11 @@ def eval_worker(
                 job_type="evaluation",
                 reinit=True
             )
-    except Exception as e:
-        print(f"⚠ Warning: Failed to initialize wandb in eval worker: {e}")
-        print("  Continuing without wandb logging in eval worker...")
-        # Continue without wandb - evaluation will still work, just won't log
+            wandb_initialized = True
+            print("✓ Wandb initialized (separate run)")
+        except Exception as e:
+            print(f"⚠ Warning: Failed to initialize wandb: {e}")
+            print("  Continuing without wandb logging...")
     
     print("✓ Evaluation worker ready")
     print("="*80)
@@ -309,7 +332,7 @@ def eval_worker(
             
             # Log to W&B (same run as training) - only if wandb is initialized
             try:
-                if wandb.run is not None:
+                if wandb_initialized and wandb.run is not None:
                     wandb.log({
                         "eval/accuracy": metrics['accuracy'],
                         "eval/format_accuracy": metrics['format_accuracy'],
@@ -331,9 +354,12 @@ def eval_worker(
                     })
                 else:
                     print("  (Skipping wandb logging - not initialized)")
+                    print(f"    Debug: wandb_initialized={wandb_initialized}, wandb.run={wandb.run}")
             except Exception as e:
                 print(f"  ⚠ Warning: Failed to log to wandb: {e}")
                 print("  Continuing without wandb logging...")
+                import traceback
+                traceback.print_exc()
             
             print(f"✓ Evaluation complete:")
             print(f"  - Accuracy: {metrics['accuracy']:.3f}")
