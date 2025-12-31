@@ -80,7 +80,7 @@ def create_config(lr: float, batch_size: int, weight_decay: float, trial_id: int
         },
         "evaluation": {
             "device": "cuda:1",  # GPU 1: Dedicated for evaluation
-            "batch_size": 320,
+            "batch_size": 240,
             "num_eval_samples": FIXED_CONFIG["num_eval_samples"],
             "temperature": 1.0,
             "top_p": 1.0,
@@ -251,7 +251,7 @@ def persistent_eval_worker(
     llm = LLM(
         model=eval_config["model"]["name"],  # Load base model
         dtype="bfloat16" if eval_config["model"]["dtype"] == "bfloat16" else "float16",
-        gpu_memory_utilization=0.85,
+        gpu_memory_utilization=0.7,  # Reduced to fit available memory
     )
     print("✓ vLLM pre-loaded and ready")
     
@@ -287,7 +287,7 @@ def persistent_eval_worker(
                 llm = LLM(
                     model=checkpoint_path,
                     dtype="bfloat16" if eval_config["model"]["dtype"] == "bfloat16" else "float16",
-                    gpu_memory_utilization=0.85,
+                    gpu_memory_utilization=0.7,  # Reduced to fit available memory
                 )
                 load_time = time.time() - load_start
                 print(f"✓ vLLM loaded from checkpoint (took {load_time:.2f}s)")
@@ -325,7 +325,7 @@ def persistent_eval_worker(
                 llm = LLM(
                     model=checkpoint_path,
                     dtype="bfloat16" if eval_config["model"]["dtype"] == "bfloat16" else "float16",
-                    gpu_memory_utilization=0.85,
+                    gpu_memory_utilization=0.7,  # Reduced to fit available memory
                 )
                 print(f"✓ vLLM reloaded")
                 

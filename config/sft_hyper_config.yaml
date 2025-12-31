@@ -1,0 +1,73 @@
+# Configuration for SFT Hyperparameter Optimization (step1_sft_hyper)
+
+model:
+  name: "Qwen/Qwen2.5-Math-1.5B-Instruct"
+  dtype: "bfloat16"
+
+training:
+  device: "cuda:0"  # GPU 0: Dedicated for training
+  # Learning rate and batch_size set by Optuna per trial
+  # weight_decay set by Optuna per trial
+  gradient_accumulation_steps: 1
+  max_batches: 50000  # Very high limit - allow full dataset training
+  eval_every: 1000  # Evaluate every 1000 batches
+  warmup_steps: 50
+  scheduler_type: "linear"
+  save_steps: 1000  # Save checkpoint every 1000 steps
+
+evaluation:
+  device: "cuda:1"  # GPU 1: Dedicated for evaluation
+  batch_size: 240
+  num_eval_samples: 500  # 500 samples for reliable evaluation
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 2048
+
+generation:
+  stop_sequences: ["</response>"]
+  include_stop_str: false
+
+data:
+  train_split: "train"
+  test_split: "test"
+  prompt_file: "prompts/math_prompt.txt"
+
+checkpointing:
+  temp_dir: "/tmp/qwen_optuna_{trial_id}"
+  output_dir: "checkpoints/optuna_trial_{trial_id}"
+  save_total_limit: 2
+  queue_maxsize: 100  # Increased for periodic checkpoints
+
+logging:
+  wandb_project: "math-sft-optuna-asha"
+  wandb_entity: "nirmalpratheep-self"
+  log_every: 10
+
+# Hyperparameter search space
+search_space:
+  learning_rate:
+    min: 5.0e-6
+    max: 1.0e-4
+    log_scale: true
+  batch_size:
+    choices: [32, 64, 128, 256]
+  weight_decay:
+    min: 0.0
+    max: 0.1
+
+# Optimization settings
+optimization:
+  n_trials: 20
+  sampler: "TPE"  # Tree-structured Parzen Estimator
+  pruner: "ASHA"  # Asynchronous Successive Halving
+  direction: "minimize"  # Minimize eval loss
+  
+# Early stopping
+early_stopping:
+  patience: 3  # Stop if no improvement for 3 evaluations
+  min_delta: 0.001  # Minimum improvement threshold
+
+# vLLM settings for evaluation
+vllm:
+  gpu_memory_utilization: 0.7  # Reduced to fit available memory
+  dtype: "bfloat16"
