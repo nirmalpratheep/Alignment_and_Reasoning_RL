@@ -10,6 +10,86 @@ from src.vllm_utils import init_vllm, create_sampling_params, load_policy_into_v
 from utils.drgrpo_grader import r1_zero_reward_fn
 
 
+def compute_eval_loss(checkpoint_path: str, val_data: list, tokenizer, num_eval_samples: int, model=None) -> tuple:
+    """Compute actual cross-entropy eval loss using transformers.
+    
+    Args:
+        checkpoint_path: Path to model checkpoint
+        val_data: Validation dataset
+        tokenizer: Tokenizer
+        num_eval_samples: Number of samples to evaluate
+        model: Optional existing model to reuse (will reload weights)
+        
+    Returns:
+        Tuple of (avg_loss, model) - returns model for reuse
+    """
+    import torch
+    from transformers import AutoModelForCausalLM
+    
+    device = "cuda:0"  # Use current GPU for loss computation
+    
+    # Load or reload weights into model
+    if model is None:
+        # First time: create model
+        print(f"  Loading model structure for loss computation...")
+        model = AutoModelForCausalLM.from_pretrained(
+            checkpoint_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True
+        )
+    else:
+        # Subsequent times: just reload weights
+        print(f"  Reloading checkpoint weights...")
+        from pathlib import Path
+        checkpoint_file = Path(checkpoint_path) / "pytorch_model.bin"
+        if checkpoint_file.exists():
+            state_dict = torch.load(checkpoint_file, map_location=device)
+            model.load_state_dict(state_dict)
+        else:
+            # Try safetensors
+            from safetensors.torch import load_file
+            checkpoint_file = Path(checkpoint_path) / "model.safetensors"
+            state_dict = load_file(str(checkpoint_file))
+            model.load_state_dict(state_dict)
+    
+    model.eval()
+    
+    # Prepare data for loss computation
+    total_loss = 0.0
+    num_samples = 0
+    batch_size = 4  # Small batch to fit in memory alongside vLLM
+    
+    # Limit to num_eval_samples
+    eval_subset = val_data[:num_eval_samples]
+    
+    with torch.no_grad():
+        for i in range(0, len(eval_subset), batch_size):
+            batch = eval_subset[i:i+batch_size]
+            
+            # Tokenize batch - combine prompt and response
+            # SFT data has 'prompt' and 'response' keys
+            texts = [item['prompt'] + item['response'] for item in batch]
+            inputs = tokenizer(
+                texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=1024
+            ).to(device)
+            
+            # Compute loss
+            # For causal LM, labels are the same as input_ids (shifted internally)
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss
+            
+            total_loss += loss.item() * len(batch)
+            num_samples += len(batch)
+    
+    avg_loss = total_loss / num_samples if num_samples > 0 else float('inf')
+    return avg_loss, model  # Return model for reuse
+
+
 def evaluate_checkpoint(
     llm,
     val_data: list,
@@ -299,6 +379,7 @@ def eval_worker(
     
     eval_step = 0
     llm = None  # vLLM instance will be created per checkpoint
+    loss_model = None  # Transformers model for loss computation (reused across checkpoints)
     
     # Main evaluation loop
     while True:
@@ -335,6 +416,32 @@ def eval_worker(
             print(f"Running evaluation on {config.evaluation.num_eval_samples} samples...")
             metrics = evaluate_checkpoint(llm, val_data, sampling_params, config, tokenizer, eval_step, prompt_template)
             
+            # Clean up vLLM before computing loss to avoid OOM
+            print(f"Unloading vLLM to free memory for loss computation...")
+            del llm
+            llm = None
+            torch.cuda.empty_cache()
+            
+            # Compute eval loss using transformers (reuse model)
+            print(f"Computing eval loss...")
+            eval_loss, loss_model = compute_eval_loss(
+                checkpoint_path, val_data, tokenizer,
+                config.evaluation.num_eval_samples, loss_model
+            )
+            print(f"✓ Eval loss computed: {eval_loss:.4f}")
+            
+            # Reload vLLM for next checkpoint
+            print(f"Reloading vLLM for next checkpoint...")
+            llm = LLM(
+                model=checkpoint_path,
+                dtype="float16",
+                seed=seed,
+                gpu_memory_utilization=0.7,
+                tensor_parallel_size=1,
+                enforce_eager=True,
+            )
+            print(f"✓ vLLM reloaded")
+            
             # Compute categorization breakdown
             total = metrics['num_evaluated']
             correct_count = metrics['correct']
@@ -352,6 +459,7 @@ def eval_worker(
             try:
                 if wandb_initialized and wandb.run is not None:
                     wandb.log({
+                        "eval/loss": eval_loss,
                         "eval/accuracy": metrics['accuracy'],
                         "eval/format_accuracy": metrics['format_accuracy'],
                         "eval/num_correct": metrics['correct'],

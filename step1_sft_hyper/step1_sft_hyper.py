@@ -110,7 +110,7 @@ def create_config(lr: float, batch_size: int, weight_decay: float, trial_id: int
     }
 
 
-def compute_eval_loss(checkpoint_path: str, val_data: list, tokenizer, eval_config: dict) -> float:
+def compute_eval_loss(checkpoint_path: str, val_data: list, tokenizer, eval_config: dict, model=None) -> tuple:
     """Compute actual cross-entropy eval loss using transformers.
     
     Args:
@@ -118,22 +118,42 @@ def compute_eval_loss(checkpoint_path: str, val_data: list, tokenizer, eval_conf
         val_data: Validation dataset
         tokenizer: Tokenizer
         eval_config: Evaluation config
+        model: Optional existing model to reuse (will reload weights)
         
     Returns:
-        Average cross-entropy loss on validation set
+        Tuple of (avg_loss, model) - returns model for reuse
     """
     import torch
     from transformers import AutoModelForCausalLM
     from torch.utils.data import DataLoader
     
-    # Load model from checkpoint
     device = "cuda:0"  # Use first available GPU for loss computation
-    model = AutoModelForCausalLM.from_pretrained(
-        checkpoint_path,
-        torch_dtype=torch.bfloat16,
-        device_map="auto",
-        trust_remote_code=True
-    )
+    
+    # Load or reload weights into model
+    if model is None:
+        # First time: create model
+        print(f"  Loading model structure...")
+        model = AutoModelForCausalLM.from_pretrained(
+            checkpoint_path,
+            torch_dtype=torch.bfloat16,
+            device_map="auto",
+            trust_remote_code=True
+        )
+    else:
+        # Subsequent times: just reload weights
+        print(f"  Reloading checkpoint weights...")
+        from pathlib import Path
+        checkpoint_file = Path(checkpoint_path) / "pytorch_model.bin"
+        if checkpoint_file.exists():
+            state_dict = torch.load(checkpoint_file, map_location=device)
+            model.load_state_dict(state_dict)
+        else:
+            # Try safetensors
+            from safetensors.torch import load_file
+            checkpoint_file = Path(checkpoint_path) / "model.safetensors"
+            state_dict = load_file(str(checkpoint_file))
+            model.load_state_dict(state_dict)
+    
     model.eval()
     
     # Prepare data for loss computation
@@ -168,12 +188,8 @@ def compute_eval_loss(checkpoint_path: str, val_data: list, tokenizer, eval_conf
             total_loss += loss.item() * len(batch)
             num_samples += len(batch)
     
-    # Clean up model to free memory
-    del model
-    torch.cuda.empty_cache()
-    
     avg_loss = total_loss / num_samples if num_samples > 0 else float('inf')
-    return avg_loss
+    return avg_loss, model  # Return model for reuse
 
 
 
@@ -234,6 +250,7 @@ def persistent_eval_worker(
     print("="*80)
     
     llm = None
+    loss_model = None  # Will be initialized on first use and reused
     
     while not shutdown_event.is_set():
         try:
@@ -290,9 +307,9 @@ def persistent_eval_worker(
                 llm = None
                 torch.cuda.empty_cache()
                 
-                # Compute actual eval loss using transformers
+                # Compute actual eval loss using transformers (reuse model)
                 print(f"Computing eval loss...")
-                eval_loss = compute_eval_loss(checkpoint_path, val_data, tokenizer, eval_config)
+                eval_loss, loss_model = compute_eval_loss(checkpoint_path, val_data, tokenizer, eval_config, loss_model)
                 print(f"✓ Eval loss computed: {eval_loss:.4f}")
                 
                 # Reload vLLM for next evaluation
