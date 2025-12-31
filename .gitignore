@@ -1,4 +1,6 @@
 wandb
+__py*
+checkpoint
 results/optuna
 results/analysis
 results/eval_logs
