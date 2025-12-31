@@ -44,7 +44,7 @@ HOW TO USE:
    pip install bitsandbytes
 
 2. Run training:
-   uv run python step1_sft.py
+   uv run python step2_sft/step2_sft.py
 
 3. Monitor memory:
    nvidia-smi

@@ -1,4 +1,4 @@
-# Step 2: Hyperparameter Optimization
+# Step 1: Hyperparameter Optimization
 
 Uses Optuna (TPE/Bayesian Optimization) to find optimal learning rate and batch size for SFT.
 
@@ -19,8 +19,8 @@ Uses Optuna (TPE/Bayesian Optimization) to find optimal learning rate and batch 
 ## Run
 
 ```bash
-cd step2_hyper
-python step2_sft_hyper.py
+cd step1_sft_hyper
+python step1_sft_hyper.py
 ```
 
 ## Output

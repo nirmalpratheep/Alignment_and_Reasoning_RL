@@ -63,11 +63,11 @@ The parser correctly extracted answers in all cases. Issues found:
 ├── step0_baseline/         # Baseline model evaluation
 │   ├── step0_baseLineModelEval.py
 │   └── evaluate_model.py
-├── step1_sft/              # Supervised Fine-Tuning
-│   ├── step1_sft.py
+├── step1_sft_hyper/        # Hyperparameter optimization
+│   ├── step1_sft_hyper.py
 │   └── README.md
-├── step2_hyper/            # Hyperparameter optimization
-│   ├── step2_sft_hyper.py
+├── step2_sft/              # Supervised Fine-Tuning
+│   ├── step2_sft.py
 │   └── README.md
 ├── src/                    # Core training/eval modules
 │   ├── training_worker.py

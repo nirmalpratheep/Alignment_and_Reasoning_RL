@@ -1,4 +1,4 @@
-# SFT Training Results - Qwen 2.5 Math 1.5B
+# Step 2: SFT Training Results - Qwen 2.5 Math 1.5B
 
 ## Performance: Baseline vs Final SFT
 
@@ -62,7 +62,7 @@ Evaluation performed every 1000 training steps on 5000 test samples:
 - **Eval frequency**: Every 1000 steps
 - **Evaluation samples**: 10000 (full test set)
 
-### Optimal Hyperparameters (from Step 2 Hyperparameter Optimization)
+### Optimal Hyperparameters (from Step 1 Hyperparameter Optimization)
 
 Based on hyperparameter optimization results, the optimal settings are:
 - **Learning rate**: **7.98e-06** (optimal from Trial 1)
@@ -71,7 +71,7 @@ Based on hyperparameter optimization results, the optimal settings are:
 
 **Note**: The current config uses LR=2e-5 and BS=32. Consider updating to the optimal values for better performance.
 
-See [step2_hyper/README.md](../step2_hyper/README.md) for full hyperparameter optimization results.
+See [step1_sft_hyper/README.md](../step1_sft_hyper/README.md) for full hyperparameter optimization results.
 
 ## Detailed Analysis
 
@@ -119,4 +119,4 @@ The primary issue remains **incomplete generation** (87.0% of format failures):
    - Consider increasing max_tokens for evaluation (currently 1024)
    - RL (GRPO/PPO) for mathematical reasoning improvement
    - Continue SFT with more data or longer training
-   - Try optimal hyperparameters from step2_hyper (LR=7.98e-06, BS=256)
+   - Try optimal hyperparameters from step1_sft_hyper (LR=7.98e-06, BS=256)

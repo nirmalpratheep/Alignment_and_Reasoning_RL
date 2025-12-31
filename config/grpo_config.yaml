@@ -1,0 +1,74 @@
+---
+# Model Configuration
+model:
+  name: "results/checkpoints/checkpoint_6000"  # Load SFT checkpoint
+  dtype: "bfloat16"
+  trust_remote_code: true
+
+# Training Configuration (AdamW optimizer)
+training:
+  learning_rate: 1.0e-5        # GRPO learning rate
+  weight_decay: 0.0            # No weight decay for GRPO
+  betas: [0.9, 0.95]           # AdamW betas
+  batch_size: 256              # Train batch size
+  max_steps: 200               # n_grpo_steps
+  eval_every: 50               # Evaluate every 50 steps
+  device: "cuda:0"
+  
+# GRPO-Specific Parameters
+grpo:
+  n_grpo_steps: 200              # Total GRPO training steps
+  group_size: 8                  # Number of completions to generate per prompt
+  rollout_batch_size: 256        # Batch size for rollout generation
+  train_batch_size: 256          # Training batch size
+  gradient_accumulation_steps: 128  # Microbatch size = 2 (256/128)
+  epochs_per_rollout_batch: 1    # On-policy (single epoch per rollout)
+  
+  # Sampling parameters
+  sampling_temperature: 1.0
+  sampling_min_tokens: 4         # Disallow empty string responses
+  sampling_max_tokens: 1024
+  
+  # Advantage computation
+  advantage_eps: 1.0e-6
+  use_std_normalization: true
+  
+  # Loss configuration
+  loss_type: "reinforce_with_baseline"  # Options: no_baseline, reinforce_with_baseline, grpo_clip
+  
+  # GPU configuration
+  gpu_memory_utilization: 0.85
+
+# Evaluation Configuration
+evaluation:
+  device: "cuda:1"
+  batch_size: 320              # Large batch for fast eval (~40GB usage)
+  num_eval_samples: 10000      # Use full test dataset
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 1024
+  
+# Generation Parameters (for evaluation)
+generation:
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 1024
+  stop_sequences: ["</answer>"]
+  include_stop_str: true
+
+# Data Configuration
+data:
+  prompt_file: "prompts/rl_zero.prompt"
+  train_val_split: 0.8
+  
+# Checkpointing
+checkpointing:
+  output_dir: "results/grpo_checkpoints"
+  queue_maxsize: 2
+  temp_dir: "/tmp/qwen_grpo_checkpoints"
+  
+# Logging
+logging:
+  wandb_project: "math-grpo"
+  wandb_entity: null
+  log_every: 1                 # Log EVERY batch to W&B
