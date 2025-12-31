@@ -284,10 +284,25 @@ def persistent_eval_worker(
                     llm, val_data, sampling_params, config, tokenizer, trial_id, prompt_template
                 )
                 
+                # Clean up vLLM to free memory for loss computation
+                print(f"Unloading vLLM to free memory for loss computation...")
+                del llm
+                llm = None
+                torch.cuda.empty_cache()
+                
                 # Compute actual eval loss using transformers
                 print(f"Computing eval loss...")
                 eval_loss = compute_eval_loss(checkpoint_path, val_data, tokenizer, eval_config)
                 print(f"✓ Eval loss computed: {eval_loss:.4f}")
+                
+                # Reload vLLM for next evaluation
+                print(f"Reloading vLLM for next checkpoint...")
+                llm = LLM(
+                    model=checkpoint_path,
+                    dtype="bfloat16" if eval_config["model"]["dtype"] == "bfloat16" else "float16",
+                    gpu_memory_utilization=0.85,
+                )
+                print(f"✓ vLLM reloaded")
                 
                 # Get categorization data from the saved analysis report
                 # (evaluate_checkpoint saves it but doesn't return it, so we need to recompute or read it)
