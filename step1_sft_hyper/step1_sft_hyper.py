@@ -246,11 +246,19 @@ def persistent_eval_worker(
     
     num_eval_samples = min(eval_config["evaluation"]["num_eval_samples"], len(val_data))
     
+    # Pre-load vLLM with base model so it's ready for first checkpoint
+    print("\nPre-loading vLLM with base model (ready for first checkpoint at step 1000)...")
+    llm = LLM(
+        model=eval_config["model"]["name"],  # Load base model
+        dtype="bfloat16" if eval_config["model"]["dtype"] == "bfloat16" else "float16",
+        gpu_memory_utilization=0.85,
+    )
+    print("✓ vLLM pre-loaded and ready")
+    
+    loss_model = None  # Will be initialized on first use and reused
+    
     print("✓ Evaluation worker ready, waiting for checkpoints...")
     print("="*80)
-    
-    llm = None
-    loss_model = None  # Will be initialized on first use and reused
     
     while not shutdown_event.is_set():
         try:
@@ -656,7 +664,7 @@ def main():
     print("SETTING UP PERSISTENT EVALUATION WORKER")
     print("="*80)
     manager = mp.Manager()
-    _shared_checkpoint_queue = manager.Queue(maxsize=50)  # Increased for multiple trials with periodic checkpoints
+    _shared_checkpoint_queue = manager.Queue(maxsize=100)  # Increased for periodic checkpoints (eval every 1000 batches)
     _shared_result_dict = manager.dict()  # Shared dict: {trial_id: metrics}
     _shared_result_manager = manager
     
