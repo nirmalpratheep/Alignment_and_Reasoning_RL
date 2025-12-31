@@ -31,17 +31,22 @@ if __name__ == "__main__":
 # Search space bounds
 LR_MIN, LR_MAX = 5e-6, 1e-4
 BATCH_SIZE_CHOICES = [128, 256, 512, 1024]
+WEIGHT_DECAY_MIN, WEIGHT_DECAY_MAX = 0.0, 0.1
 
 # Fixed parameters
 FIXED_CONFIG = {
-    "max_batches": 200,
-    "eval_every": 999999,    # Only eval at end (final checkpoint only)
-    "warmup_steps": 20,
-    "num_eval_samples": 200,
+    "max_batches": 1000,  # Increased for early stopping
+    "eval_every": 100,     # Evaluate every 100 steps for early stopping
+    "warmup_steps": 50,
+    "num_eval_samples": 500,  # More samples for reliable early stopping
 }
 
 # Number of optimization trials
-N_TRIALS = 15
+N_TRIALS = 20  # More trials for ASHA
+
+# Early stopping config
+EARLY_STOPPING_PATIENCE = 3  # Stop if no improvement for 3 evaluations
+EARLY_STOPPING_MIN_DELTA = 0.001  # Minimum improvement threshold
 
 # Global shared queues for persistent eval worker
 _shared_checkpoint_queue: Optional[mp.Queue] = None
@@ -50,7 +55,7 @@ _shared_result_dict: Optional[dict] = None
 _persistent_eval_process: Optional[mp.Process] = None
 
 
-def create_config(lr: float, batch_size: int, trial_id: int) -> Dict[str, Any]:
+def create_config(lr: float, batch_size: int, weight_decay: float, trial_id: int) -> Dict[str, Any]:
     """Create config dict for a trial.
     
     GPU Assignment:
@@ -64,7 +69,7 @@ def create_config(lr: float, batch_size: int, trial_id: int) -> Dict[str, Any]:
         },
         "training": {
             "learning_rate": lr,
-            "weight_decay": 0.01,
+            "weight_decay": weight_decay,
             "batch_size": batch_size,
             "num_epochs": 1,
             "gradient_accumulation_steps": max(1, 64 // batch_size),
@@ -98,7 +103,7 @@ def create_config(lr: float, batch_size: int, trial_id: int) -> Dict[str, Any]:
             "temp_dir": f"/tmp/qwen_optuna_{trial_id}"
         },
         "logging": {
-            "wandb_project": "math-sft-optuna",
+            "wandb_project": "math-sft-optuna-asha",
             "wandb_entity": None,
             "log_every": 10
         }
@@ -238,7 +243,7 @@ def persistent_eval_worker(
                 if run_info:
                     # Resume/join the existing run using the run ID
                     wandb.init(
-                        project=run_info.get("project", eval_config.get("logging", {}).get("wandb_project", "math-sft-optuna")),
+                        project=run_info.get("project", eval_config.get("logging", {}).get("wandb_project", "math-sft-optuna-asha")),
                         name=run_info.get("name"),
                         id=run_info.get("id"),  # Use the stored run ID
                         resume="allow",  # Resume the existing run
@@ -248,7 +253,7 @@ def persistent_eval_worker(
                     # Fallback: create new run if info not available yet
                     # This might happen if eval runs before training sets the info
                     wandb.init(
-                        project=eval_config.get("logging", {}).get("wandb_project", "math-sft-optuna"),
+                        project=eval_config.get("logging", {}).get("wandb_project", "math-sft-optuna-asha"),
                         name=f"trial_{trial_id}",
                         group="optuna_search",
                         reinit=True
@@ -318,19 +323,20 @@ def persistent_eval_worker(
 
 
 def objective(trial: optuna.Trial) -> float:
-    """Optuna objective function - returns accuracy to maximize."""
+    """Optuna objective function - returns accuracy to maximize with early stopping."""
     
     # Sample hyperparameters
     lr = trial.suggest_float("learning_rate", LR_MIN, LR_MAX, log=True)
     batch_size = trial.suggest_categorical("batch_size", BATCH_SIZE_CHOICES)
+    weight_decay = trial.suggest_float("weight_decay", WEIGHT_DECAY_MIN, WEIGHT_DECAY_MAX)
     
     trial_id = trial.number
     print(f"\n{'='*80}")
-    print(f"OPTUNA TRIAL {trial_id}: LR={lr:.2e}, BS={batch_size}")
+    print(f"OPTUNA TRIAL {trial_id}: LR={lr:.2e}, BS={batch_size}, WD={weight_decay:.4f}")
     print(f"{'='*80}\n")
     
     # Create config
-    config_dict = create_config(lr, batch_size, trial_id)
+    config_dict = create_config(lr, batch_size, weight_decay, trial_id)
     config_path = f"config/optuna_trial_{trial_id}.yaml"
     with open(config_path, 'w') as f:
         yaml.dump(config_dict, f, default_flow_style=False)
@@ -357,6 +363,7 @@ def objective(trial: optuna.Trial) -> float:
                 "trial_id": trial_id,
                 "learning_rate": lr,
                 "batch_size": batch_size,
+                "weight_decay": weight_decay,
                 "effective_batch_size": batch_size * config_dict["training"]["gradient_accumulation_steps"],
             },
             group="optuna_search",
@@ -513,7 +520,7 @@ def main():
             "dtype": "bfloat16"
         },
         "logging": {
-            "wandb_project": "math-sft-optuna",
+            "wandb_project": "math-sft-optuna-asha",
             "wandb_entity": None,
         },
         "evaluation": {
@@ -560,12 +567,16 @@ def main():
     # Give eval worker time to initialize
     time.sleep(3)
     
-    # Create Optuna study
+    # Create Optuna study with ASHA pruner
     study = optuna.create_study(
-        study_name="sft_hyperparam_search",
+        study_name="sft_hyperparam_search_asha",
         direction="maximize",  # Maximize accuracy
         sampler=optuna.samplers.TPESampler(seed=42),
-        pruner=optuna.pruners.MedianPruner(n_warmup_steps=3)
+        pruner=optuna.pruners.SuccessiveHalvingPruner(
+            min_resource=1,  # Minimum number of checkpoints to evaluate
+            reduction_factor=3,  # Prune bottom 1/3 at each rung
+            min_early_stopping_rate=0  # Start pruning from first rung
+        )
     )
     
     try:
@@ -632,7 +643,7 @@ def main():
         }, f)
     
     print(f"\nResults saved to: {results_path}")
-    print(f"\nCheck W&B project 'math-sft-optuna' for detailed metrics.")
+    print(f"\nCheck W&B project 'math-sft-optuna-asha' for detailed metrics.")
     
     # Show trial history
     print("\nTrial history:")
