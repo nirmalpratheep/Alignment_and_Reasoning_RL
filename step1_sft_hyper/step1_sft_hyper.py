@@ -509,32 +509,30 @@ def objective(trial: optuna.Trial) -> float:
         validate_config(config)
         
         # Initialize W&B and store run info for eval worker
-        run_name = f"trial_{trial_id}_lr{lr:.2e}_bs{batch_size}"
         wandb.init(
-            project=config_dict["logging"]["wandb_project"],
-            name=run_name,
+            project="math-sft-optuna-asha",
+            entity="nirmalpratheep-self",
+            name=f"trial_{trial_id}",
             config={
                 "trial_id": trial_id,
                 "learning_rate": lr,
                 "batch_size": batch_size,
                 "weight_decay": weight_decay,
-                "effective_batch_size": batch_size * config_dict["training"]["gradient_accumulation_steps"],
             },
             group="optuna_search",
             reinit=True
         )
         
-        # Store run name and ID so eval worker can log to the same run
-        if _shared_result_dict is not None:
-            # Use a separate key for run info
-            run_info_key = "__trial_run_info__"
-            if run_info_key not in _shared_result_dict:
-                _shared_result_dict[run_info_key] = {}
-            _shared_result_dict[run_info_key][trial_id] = {
-                "name": run_name,
-                "id": wandb.run.id,  # Store the actual run ID
-                "project": config_dict["logging"]["wandb_project"]
-            }
+        # Store W&B run info in shared dict for eval worker
+        run_info_key = "__wandb_run_info__"
+        if run_info_key not in _shared_result_dict:
+            _shared_result_dict[run_info_key] = {}
+        _shared_result_dict[run_info_key][trial_id] = {
+            "id": wandb.run.id,
+            "name": wandb.run.name,
+            "project": wandb.run.project,
+        }
+        print(f"✓ W&B run info stored: {wandb.run.name} (ID: {wandb.run.id})")
         
         # Load datasets
         loader = MathDatasetLoader()
