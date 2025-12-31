@@ -110,6 +110,72 @@ def create_config(lr: float, batch_size: int, weight_decay: float, trial_id: int
     }
 
 
+def compute_eval_loss(checkpoint_path: str, val_data: list, tokenizer, eval_config: dict) -> float:
+    """Compute actual cross-entropy eval loss using transformers.
+    
+    Args:
+        checkpoint_path: Path to model checkpoint
+        val_data: Validation dataset
+        tokenizer: Tokenizer
+        eval_config: Evaluation config
+        
+    Returns:
+        Average cross-entropy loss on validation set
+    """
+    import torch
+    from transformers import AutoModelForCausalLM
+    from torch.utils.data import DataLoader
+    
+    # Load model from checkpoint
+    device = "cuda:0"  # Use first available GPU for loss computation
+    model = AutoModelForCausalLM.from_pretrained(
+        checkpoint_path,
+        torch_dtype=torch.bfloat16,
+        device_map="auto",
+        trust_remote_code=True
+    )
+    model.eval()
+    
+    # Prepare data for loss computation
+    total_loss = 0.0
+    num_samples = 0
+    batch_size = 4  # Small batch to fit in memory alongside vLLM
+    
+    # Limit to num_eval_samples
+    num_eval_samples = eval_config["evaluation"]["num_eval_samples"]
+    eval_subset = val_data[:num_eval_samples]
+    
+    with torch.no_grad():
+        for i in range(0, len(eval_subset), batch_size):
+            batch = eval_subset[i:i+batch_size]
+            
+            # Tokenize batch
+            texts = [item['text'] for item in batch]
+            inputs = tokenizer(
+                texts,
+                return_tensors="pt",
+                padding=True,
+                truncation=True,
+                max_length=1024
+            ).to(device)
+            
+            # Compute loss
+            # For causal LM, labels are the same as input_ids (shifted internally)
+            outputs = model(**inputs, labels=inputs["input_ids"])
+            loss = outputs.loss
+            
+            total_loss += loss.item() * len(batch)
+            num_samples += len(batch)
+    
+    # Clean up model to free memory
+    del model
+    torch.cuda.empty_cache()
+    
+    avg_loss = total_loss / num_samples if num_samples > 0 else float('inf')
+    return avg_loss
+
+
+
 def persistent_eval_worker(
     checkpoint_queue: mp.Queue,
     result_dict: dict,
@@ -217,6 +283,11 @@ def persistent_eval_worker(
                     llm, val_data, sampling_params, config, tokenizer, trial_id, prompt_template
                 )
                 
+                # Compute actual eval loss using transformers
+                print(f"Computing eval loss...")
+                eval_loss = compute_eval_loss(checkpoint_path, val_data, tokenizer, eval_config)
+                print(f"✓ Eval loss computed: {eval_loss:.4f}")
+                
                 # Get categorization data from the saved analysis report
                 # (evaluate_checkpoint saves it but doesn't return it, so we need to recompute or read it)
                 # For now, we'll compute categorization from the metrics we have
@@ -260,6 +331,7 @@ def persistent_eval_worker(
                     )
                 
                 wandb.log({
+                    "eval/loss": eval_loss,
                     "eval/accuracy": metrics['accuracy'],
                     "eval/format_accuracy": metrics['format_accuracy'],
                     "eval/num_correct": metrics['correct'],
@@ -281,9 +353,10 @@ def persistent_eval_worker(
                 
                 wandb.finish()
                 
-                # Store result (include categorization for reference)
+                # Store result (include categorization and eval_loss for reference)
                 metrics_with_categorization = {
                     **metrics,
+                    "eval_loss": eval_loss,
                     "categorization": {
                         "category_1_correct": category_1_count,
                         "category_2_wrong_answer": category_2_count,
@@ -293,6 +366,7 @@ def persistent_eval_worker(
                 result_dict[trial_id] = metrics_with_categorization
                 
                 print(f"✓ Evaluation complete for Trial {trial_id}:")
+                print(f"  - Eval Loss: {eval_loss:.4f}")
                 print(f"  - Accuracy: {metrics['accuracy']:.3f}")
                 print(f"  - Format Accuracy: {metrics['format_accuracy']:.3f}")
                 print(f"  - Correct: {metrics['correct']}/{metrics['num_evaluated']}")
@@ -323,7 +397,7 @@ def persistent_eval_worker(
 
 
 def objective(trial: optuna.Trial) -> float:
-    """Optuna objective function - returns accuracy to maximize with early stopping."""
+    """Optuna objective function - returns eval loss to minimize."""
     
     # Sample hyperparameters
     lr = trial.suggest_float("learning_rate", LR_MIN, LR_MAX, log=True)
@@ -423,7 +497,7 @@ def objective(trial: optuna.Trial) -> float:
                 _shared_result_dict[trial_id] = {"accuracy": 0.0, "error": "Checkpoint not found"}
         
         # Wait for evaluation result
-        final_accuracy = 0.0
+        final_loss = float('inf')  # Default to high loss if eval fails
         max_wait_time = 300  # 5 minutes
         wait_interval = 2  # Check every 2 seconds
         waited = 0
@@ -432,10 +506,10 @@ def objective(trial: optuna.Trial) -> float:
         while waited < max_wait_time:
             if trial_id in _shared_result_dict:
                 result = _shared_result_dict[trial_id]
-                final_accuracy = result.get("accuracy", 0.0)
+                final_loss = result.get("eval_loss", float('inf'))
                 if "error" in result:
                     print(f"⚠ Evaluation had error: {result['error']}")
-                print(f"✓ Received evaluation result: accuracy={final_accuracy:.4f}")
+                print(f"✓ Received evaluation result: eval_loss={final_loss:.4f}")
                 break
             time.sleep(wait_interval)
             waited += wait_interval
@@ -444,16 +518,16 @@ def objective(trial: optuna.Trial) -> float:
         
         if waited >= max_wait_time and trial_id not in _shared_result_dict:
             print(f"⚠ Timeout waiting for evaluation result")
-            print("  Using default accuracy of 0.0")
-            _shared_result_dict[trial_id] = {"accuracy": 0.0, "error": "Timeout"}
+            print(f"  Using default loss of inf")
+            _shared_result_dict[trial_id] = {"eval_loss": float('inf'), "error": "Timeout"}
         
         wandb.finish()
         
-        # Report to Optuna for pruning
-        trial.report(final_accuracy, step=FIXED_CONFIG["max_batches"])
+        # Report to Optuna for pruning (lower loss is better)
+        trial.report(final_loss, step=FIXED_CONFIG["max_batches"])
         
-        print(f"✓ Trial {trial_id} complete: accuracy={final_accuracy:.4f}")
-        return final_accuracy
+        print(f"✓ Trial {trial_id} complete: eval_loss={final_loss:.4f}")
+        return final_loss
         
     except Exception as e:
         print(f"⚠ Trial {trial_id} failed: {e}")
@@ -462,7 +536,7 @@ def objective(trial: optuna.Trial) -> float:
         wandb.finish()
         # Mark as failed in result dict
         if _shared_result_dict is not None:
-            _shared_result_dict[trial_id] = {"accuracy": 0.0, "error": str(e)}
+            _shared_result_dict[trial_id] = {"eval_loss": float('inf'), "error": str(e)}
         raise optuna.TrialPruned()
     
     finally:
@@ -485,7 +559,7 @@ def main():
     print(f"\nOptimization:")
     print(f"  - Algorithm: TPE (Tree-structured Parzen Estimator)")
     print(f"  - Trials: {N_TRIALS}")
-    print(f"  - Objective: Maximize eval/accuracy")
+    print(f"  - Objective: Minimize eval/loss")
     print(f"\nFixed settings:")
     for k, v in FIXED_CONFIG.items():
         print(f"  - {k}: {v}")
@@ -570,7 +644,7 @@ def main():
     # Create Optuna study with ASHA pruner
     study = optuna.create_study(
         study_name="sft_hyperparam_search_asha",
-        direction="maximize",  # Maximize accuracy
+        direction="minimize",  # Minimize eval loss
         sampler=optuna.samplers.TPESampler(seed=42),
         pruner=optuna.pruners.SuccessiveHalvingPruner(
             min_resource=1,  # Minimum number of checkpoints to evaluate
