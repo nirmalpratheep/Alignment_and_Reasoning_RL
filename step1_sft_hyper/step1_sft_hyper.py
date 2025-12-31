@@ -353,11 +353,18 @@ def persistent_eval_worker(
                 category_3_count = total - format_correct_count
                 
                 # Log to the same wandb run as the training trial
-                # Get the run info for this trial from shared dict
-                run_info_key = "__trial_run_info__"
+                # Wait for training to set W&B run info
+                run_info_key = "__wandb_run_info__"
                 run_info = None
-                if run_info_key in result_dict:
-                    run_info = result_dict[run_info_key].get(trial_id)
+                max_wait = 60  # Wait up to 60 seconds for run info
+                waited = 0
+                
+                while waited < max_wait and run_info is None:
+                    if run_info_key in result_dict:
+                        run_info = result_dict[run_info_key].get(trial_id)
+                    if run_info is None:
+                        time.sleep(1)
+                        waited += 1
                 
                 if run_info:
                     # Resume/join the existing run using the run ID
@@ -368,28 +375,30 @@ def persistent_eval_worker(
                         resume="allow",
                         reinit=True
                     )
-                
-                # Log to W&B (use existing trial run)
-                wandb.log({
-                    "eval/loss": eval_loss,
-                    "eval/accuracy": metrics['accuracy'],
-                    "eval/format_accuracy": metrics['format_accuracy'],
-                    "eval/num_correct": metrics['correct'],
-                    "eval/num_format_correct": metrics['format_correct'],
-                    "eval/num_evaluated": metrics['num_evaluated'],
-                    "eval/avg_response_length": metrics['avg_response_length'],
-                    "eval/avg_response_length_correct": metrics['avg_response_length_correct'],
-                    "eval/avg_response_length_incorrect": metrics['avg_response_length_incorrect'],
-                    "eval/avg_token_entropy": metrics['avg_token_entropy'],
-                    # Categorization metrics
-                    "eval/category_1_correct_count": category_1_count,
-                    "eval/category_1_correct_pct": (category_1_count / total * 100) if total > 0 else 0.0,
-                    "eval/category_2_wrong_answer_count": category_2_count,
-                    "eval/category_2_wrong_answer_pct": (category_2_count / total * 100) if total > 0 else 0.0,
-                    "eval/category_3_format_failure_count": category_3_count,
-                    "eval/category_3_format_failure_pct": (category_3_count / total * 100) if total > 0 else 0.0,
-                    "trial_id": trial_id,
-                })
+                    
+                    # Log to W&B
+                    wandb.log({
+                        "eval/loss": eval_loss,
+                        "eval/accuracy": metrics['accuracy'],
+                        "eval/format_accuracy": metrics['format_accuracy'],
+                        "eval/num_correct": metrics['correct'],
+                        "eval/num_format_correct": metrics['format_correct'],
+                        "eval/num_evaluated": metrics['num_evaluated'],
+                        "eval/avg_response_length": metrics['avg_response_length'],
+                        "eval/avg_response_length_correct": metrics['avg_response_length_correct'],
+                        "eval/avg_response_length_incorrect": metrics['avg_response_length_incorrect'],
+                        "eval/avg_token_entropy": metrics['avg_token_entropy'],
+                        # Categorization metrics
+                        "eval/category_1_correct_count": category_1_count,
+                        "eval/category_1_correct_pct": (category_1_count / total * 100) if total > 0 else 0.0,
+                        "eval/category_2_wrong_answer_count": category_2_count,
+                        "eval/category_2_wrong_answer_pct": (category_2_count / total * 100) if total > 0 else 0.0,
+                        "eval/category_3_format_failure_count": category_3_count,
+                        "eval/category_3_format_failure_pct": (category_3_count / total * 100) if total > 0 else 0.0,
+                        "trial_id": trial_id,
+                    })
+                else:
+                    print(f"  ⚠ W&B run info not available for trial {trial_id} after {max_wait}s, skipping W&B logging")
                 
                 # Store result (include categorization and eval_loss for reference)
                 metrics_with_categorization = {
