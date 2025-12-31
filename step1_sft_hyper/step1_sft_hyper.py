@@ -512,30 +512,35 @@ def objective(trial: optuna.Trial) -> float:
         
         train_data = prepare_sft_dataset(train_examples, prompt_template)
         
-        # Create a dummy eval queue (training_loop expects it but we won't use it)
-        # We'll send checkpoints to the shared queue manually
-        dummy_eval_queue = mp.Queue(maxsize=1)
+        # Create a wrapper queue that intercepts checkpoints and adds trial_id
+        # This allows training_loop to work unchanged while sending to shared queue
+        class TrialCheckpointQueue:
+            """Wrapper that adds trial_id to checkpoints before sending to shared queue."""
+            def __init__(self, shared_queue, trial_id):
+                self.shared_queue = shared_queue
+                self.trial_id = trial_id
+            
+            def put(self, checkpoint_path, block=True, timeout=None):
+                """Put checkpoint with trial_id into shared queue."""
+                if checkpoint_path is None:
+                    # Shutdown signal - don't forward to eval
+                    return
+                print(f"  Queuing checkpoint for eval: {checkpoint_path}")
+                self.shared_queue.put((self.trial_id, str(checkpoint_path)), block=block, timeout=timeout)
+            
+            def put_nowait(self, checkpoint_path):
+                """Non-blocking put."""
+                self.put(checkpoint_path, block=False)
+            
+            def full(self):
+                """Check if shared queue is full."""
+                return self.shared_queue.full()
         
-        # Run training (this saves checkpoints but doesn't send them to eval_queue)
-        training_loop(config, train_data, tokenizer, dummy_eval_queue)
+        # Use wrapper queue - routes checkpoints to shared queue with trial_id
+        eval_queue_wrapper = TrialCheckpointQueue(_shared_checkpoint_queue, trial_id)
         
-        # Find final checkpoint and send to shared eval queue
-        final_step = FIXED_CONFIG['max_batches']
-        final_checkpoint_path = Path(config.checkpointing.temp_dir) / f"step_{final_step}"
-        
-        if final_checkpoint_path.exists():
-            print(f"\nSending final checkpoint to shared eval worker: {final_checkpoint_path}")
-            _shared_checkpoint_queue.put((trial_id, str(final_checkpoint_path)))
-        else:
-            # Fallback: try output_dir/final
-            fallback_path = Path(config.checkpointing.output_dir) / "final"
-            if fallback_path.exists():
-                print(f"\nSending final checkpoint to shared eval worker (fallback): {fallback_path}")
-                _shared_checkpoint_queue.put((trial_id, str(fallback_path)))
-            else:
-                print(f"⚠ Final checkpoint not found at {final_checkpoint_path} or {fallback_path}")
-                print("  Evaluation will be skipped")
-                _shared_result_dict[trial_id] = {"accuracy": 0.0, "error": "Checkpoint not found"}
+        # Run training - checkpoints will go directly to shared queue
+        training_loop(config, train_data, tokenizer, eval_queue_wrapper)
         
         # Wait for evaluation result
         final_loss = float('inf')  # Default to high loss if eval fails
