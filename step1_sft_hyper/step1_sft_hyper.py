@@ -30,19 +30,19 @@ if __name__ == "__main__":
 
 # Search space bounds
 LR_MIN, LR_MAX = 5e-6, 1e-4
-BATCH_SIZE_CHOICES = [128, 256, 512, 1024]
+BATCH_SIZE_CHOICES = [ 32, 64, 128, 256]
 WEIGHT_DECAY_MIN, WEIGHT_DECAY_MAX = 0.0, 0.1
 
 # Fixed parameters
 FIXED_CONFIG = {
-    "max_batches": 1000,  # Train for 1000 batches
-    "eval_every": 999999,  # Only eval at end (single final evaluation)
+    "max_batches": 50000,  # Very high limit - allow full dataset training
+    "eval_every": 1000,     # Evaluate every 1000 batches
     "warmup_steps": 50,
-    "num_eval_samples": 500,  # 500 samples for reliable final evaluation
+    "num_eval_samples": 500,  # 500 samples for reliable evaluation
 }
 
 # Number of optimization trials
-N_TRIALS = 20  # More trials for ASHA
+N_TRIALS = 30  # More trials for ASHA
 
 # Early stopping config
 EARLY_STOPPING_PATIENCE = 3  # Stop if no improvement for 3 evaluations

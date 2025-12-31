@@ -7,14 +7,19 @@ Uses Optuna (TPE/Bayesian Optimization) to find optimal learning rate and batch 
 | Parameter | Range | Type |
 |-----------|-------|------|
 | Learning Rate | [5e-6, 1e-4] | Log scale |
-| Batch Size | [128, 256, 512, 1024] | Categorical |
+| Batch Size | [32, 64, 128, 256] | Categorical (optimized for 1.5B model) |
+| Weight Decay | [0.0, 0.1] | Linear scale |
 
 ## Configuration
 
 - **Algorithm**: TPE (Tree-structured Parzen Estimator)
-- **Trials**: 15
-- **Training steps**: 200 per trial
-- **Eval samples**: 200 per trial
+- **Pruner**: ASHA (Asynchronous Successive Halving) - prunes worst ~60-70% of trials early
+- **Trials**: 20
+- **Objective**: Minimize eval loss (cross-entropy)
+- **Training**: Up to 50,000 batches per trial (allow full dataset)
+- **Evaluation**: Every 1000 batches on 500 samples
+- **Early Stopping**: patience=3, min_delta=0.001
+- **Model Reuse**: Transformers model loaded once, weights reloaded per trial (~27s saved/trial)
 
 ## Run
 
@@ -25,16 +30,46 @@ python step1_sft_hyper.py
 
 ## Output
 
-- **W&B Project**: [math-sft-optuna](https://wandb.ai/nirmalpratheep-self/math-sft-optuna)
+- **W&B Project**: [math-sft-optuna-asha](https://wandb.ai/nirmalpratheep-self/math-sft-optuna-asha)
   - View all trial runs, training metrics, and evaluation results
-  - Compare hyperparameters across trials
-  - Analyze categorization breakdowns and accuracy trends
+  - Compare hyperparameters across trials (LR, batch size, weight decay)
+  - Analyze eval loss, accuracy trends, and categorization breakdowns
 - **Best params saved to**: `results/optuna/study_results.yaml`
 
 ## Expected Time
 
-- ~4 min per trial
-- ~1 hour total for 15 trials
+- ~10-20 min per trial (ASHA prunes many early)
+- ~3-5 hours total for 20 trials (depends on early stopping)
+
+
+## Technical Architecture
+
+**Dual-GPU Pipeline:**
+- **GPU 0**: Sequential trial training (one trial at a time)
+- **GPU 1**: Persistent eval worker (processes all trials)
+
+**Evaluation Optimization:**
+- **vLLM**: Fast accuracy metrics (unloaded before loss computation)
+- **Transformers**: Actual cross-entropy loss (model loaded once, weights reloaded)
+- **Memory Management**: vLLM ↔ transformers switching to avoid OOM
+- **Time Savings**: ~27 seconds per trial from model weight reuse
+
+**Early Stopping (Configured):**
+- Evaluate every 1000 batches
+- Track eval loss history
+- Stop trial if no improvement for 3 consecutive evaluations
+- Min improvement threshold: 0.001
+- Allow up to 50,000 batches (full dataset) if loss keeps improving
+
+**ASHA Pruning:**
+- Prunes underperforming trials aggressively (~60-70%)
+- Works in tandem with early stopping
+- Focuses compute on promising hyperparameter regions
+
+**W&B Logging:**
+- Project: `math-sft-optuna-asha`
+- Metrics: `eval/loss`, `eval/accuracy`, `train/loss`
+- Each trial logged individually with hyperparameters
 
 ## Results
 

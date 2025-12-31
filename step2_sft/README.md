@@ -30,20 +30,31 @@ Evaluation performed every 1000 training steps on 5000 test samples:
 
 **Dual-GPU Pipeline**:
 - **GPU 0**: Training (BF16, gradient checkpointing)
-- **GPU 1**: Evaluation (vLLM, continuous checkpoint loading)
+- **GPU 1**: Evaluation (vLLM for accuracy + transformers for loss)
 
 **Key Features**:
 - **Unified W&B Logging**: Training and evaluation metrics logged to the same wandb run
 - **Persistent Eval Worker**: Single eval worker processes all checkpoints efficiently
+- **Eval Loss Computation**: Actual cross-entropy loss computed using transformers
+- **Model Weight Reuse**: Transformers model loaded once, weights reloaded per checkpoint (~27s saved/checkpoint)
+- **Memory Management**: vLLM unloaded before loss computation, then reloaded
 - **Gradient checkpointing** for memory efficiency
 - **AdamW optimizer** with linear warmup
 - **vLLM** for fast batch inference
 - **CUDA_VISIBLE_DEVICES** isolation per worker
 
+**Evaluation Process per Checkpoint**:
+1. Load checkpoint into vLLM
+2. Run evaluation on validation set (accuracy, format metrics)
+3. Unload vLLM to free GPU memory
+4. Compute eval loss using transformers (reuse model structure, reload weights only)
+5. Reload vLLM for next checkpoint
+6. Log all metrics to W&B: `eval/loss`, `eval/accuracy`, categorization
+
 **W&B Integration**:
 - Both training and evaluation metrics appear in the same wandb run
 - Training metrics: `train/loss`, `train/learning_rate`, etc.
-- Evaluation metrics: `eval/accuracy`, `eval/format_accuracy`, categorization breakdowns
+- Evaluation metrics: `eval/loss`, `eval/accuracy`, `eval/format_accuracy`, categorization breakdowns
 - View results: [wandb project](https://wandb.ai/nirmalpratheep-self/math-sft)
 
 ## Memory Profile
