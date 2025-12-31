@@ -149,8 +149,9 @@ def compute_eval_loss(checkpoint_path: str, val_data: list, tokenizer, eval_conf
         for i in range(0, len(eval_subset), batch_size):
             batch = eval_subset[i:i+batch_size]
             
-            # Tokenize batch
-            texts = [item['text'] for item in batch]
+            # Tokenize batch - combine prompt and response
+            # SFT data has 'prompt' and 'response' keys
+            texts = [item['prompt'] + item['response'] for item in batch]
             inputs = tokenizer(
                 texts,
                 return_tensors="pt",
