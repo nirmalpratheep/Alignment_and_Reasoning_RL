@@ -1,7 +1,9 @@
 wandb
 __py*
+src/__py*
 checkpoint
 results/optuna
 results/analysis
 results/eval_logs
 results/checkpoints
+uv*

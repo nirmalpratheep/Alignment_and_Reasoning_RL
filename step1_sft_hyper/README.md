@@ -34,7 +34,8 @@ python step1_sft_hyper.py
   - View all trial runs, training metrics, and evaluation results
   - Compare hyperparameters across trials (LR, batch size, weight decay)
   - Analyze eval loss, accuracy trends, and categorization breakdowns
-- **Best params saved to**: `results/optuna/study_results.yaml`
+- **Best params**: `results/optuna/study_results.yaml` (best_trial, eval_loss, LR, batch_size, weight_decay)
+- **Evaluation summaries**: `results/analysis/summary_step_*.json` (accuracy, format_accuracy, categorization)
 
 ## Expected Time
 
@@ -73,16 +74,21 @@ python step1_sft_hyper.py
 
 ## Results
 
-### Best Trial
+### Best Result
 
-- **Trial**: 1
-- **Accuracy**: 0.0300 (3.0%)
-- **Learning Rate**: 7.98e-06
-- **Batch Size**: 256
+**Evaluation Step 2** (Trial 4) achieved the best accuracy:
+
+- Accuracy: 24.00%
+- Format Accuracy: 87.78%
+- Correct: 24.00%
+- Wrong Answer: 63.78%
+- Format Failure: 12.22%
+
+Hyperparameters (LR, batch size, weight decay) for Trial 4: See [W&B project](https://wandb.ai/nirmalpratheep-self/math-sft-optuna-asha) or `results/optuna/study_results.yaml` when study completes.
 
 ### Training & Evaluation Metrics
 
-View detailed metrics and visualizations on the [wandb project page](https://wandb.ai/nirmalpratheep-self/math-sft-optuna).
+View detailed metrics and visualizations on the [wandb project page](https://wandb.ai/nirmalpratheep-self/math-sft-optuna-asha).
 
 #### Training Loss Progression
 ![Training Loss](images/training_loss.png)
@@ -90,54 +96,34 @@ View detailed metrics and visualizations on the [wandb project page](https://wan
 
 #### Evaluation Accuracy
 ![Evaluation Accuracy](images/eval_accuracy.png)
-*Evaluation accuracy across trials. Best performance achieved in Trial 1 with 3.0% accuracy.*
+*Evaluation accuracy across trials. Best performance achieved in the trial with lowest eval loss.*
 
 #### Hyperparameter Comparison
 ![Hyperparameter Comparison](images/hyperparam_comparison.png)
-*Learning rate vs batch size comparison showing optimal region around LR=7-8e-06 and BS=256.*
+*Learning rate vs batch size comparison showing optimal region.*
 
 #### Categorization Breakdown
 ![Categorization](images/categorization.png)
 *Breakdown of results into correct answers, wrong answers, and format failures across trials.*
 
-### Trial History
+### Evaluation Results
 
-| Trial | Learning Rate | Batch Size | Accuracy |
-|-------|---------------|------------|----------|
-| 0 | 1.54e-05 | 128 | 0.0100 (1.0%) |
-| **1** | **7.98e-06** | **256** | **0.0300 (3.0%)** ⭐ |
-| 2 | 5.32e-06 | 128 | 0.0200 (2.0%) |
-| 3 | 8.66e-06 | 256 | 0.0100 (1.0%) |
-| 4 | 3.13e-05 | 1024 | 0.0000 (0.0%) |
-| 5 | 5.25e-05 | 512 | 0.0000 (0.0%) |
-| 6 | 3.09e-05 | 1024 | 0.0000 (0.0%) |
-| 7 | 5.63e-05 | 512 | 0.0000 (0.0%) |
-| 8 | 7.21e-06 | 512 | 0.0200 (2.0%) |
-| 9 | 3.64e-05 | 512 | 0.0050 (0.5%) |
-| 10 | 1.46e-05 | 256 | 0.0100 (1.0%) |
-| 11 | 5.11e-06 | 128 | 0.0050 (0.5%) |
-| 12 | 1.04e-05 | 256 | 0.0200 (2.0%) |
-| 13 | 5.24e-06 | 128 | 0.0250 (2.5%) |
-| 14 | 1.36e-05 | 128 | 0.0100 (1.0%) |
+| Eval Step | Accuracy | Format Acc | Correct (%) | Wrong Answer (%) | Format Failure (%) |
+|-----------|----------|------------|-------------|------------------|--------------------|
+| 0 | 6.88% | 22.22% | 6.88 | 15.34 | 77.78 |
+| 1 | 2.80% | 9.12% | 2.80 | 6.32 | 90.88 |
+| **2** | **24.00%** ⭐ | **87.78%** | **24.00** | **63.78** | **12.22** |
+| 3 | 7.04% | 25.52% | 7.04 | 18.48 | 74.48 |
+| 4 | 8.00% | 27.46% | 8.00 | 19.46 | 72.54 |
+| 5 | 7.88% | 26.92% | 7.88 | 19.04 | 73.08 |
+| 6 | 8.32% | 26.82% | 8.32 | 18.50 | 73.18 |
 
-### Key Observations
+Eval loss and hyperparameters (LR, BS, WD) for each trial: `results/optuna/study_results.yaml` or [W&B project](https://wandb.ai/nirmalpratheep-self/math-sft-optuna-asha).
 
-1. **Best Performance**: Trial 1 achieved 3.0% accuracy with LR=7.98e-06 and BS=256
-2. **Learning Rate Range**: Lower learning rates (5e-6 to 1e-5) generally performed better than higher rates (>3e-5)
-3. **Batch Size**: Medium batch sizes (256, 512) showed better results than very large (1024) or very small (128) batches
-4. **High LR Issues**: Trials with learning rates >3e-5 (Trials 4-7) resulted in 0% accuracy, suggesting training instability
-5. **Top 3 Trials**:
-   - Trial 1: 3.0% (LR=7.98e-06, BS=256)
-   - Trial 13: 2.5% (LR=5.24e-06, BS=128)
-   - Trials 2, 8, 12: 2.0% (various LR/BS combinations)
+### Observations
 
-### Recommendations
-
-Based on the results, the optimal hyperparameters for this model and dataset are:
-- **Learning Rate**: ~7-8e-06 (sweet spot around 7.98e-06)
-- **Batch Size**: 256 (good balance between stability and performance)
-
-For future experiments, consider:
-- Narrowing the learning rate search around 7-8e-06
-- Exploring batch sizes between 256-512
-- Avoiding learning rates >3e-5 which cause training instability
+- Step 2 achieved best accuracy (24.00%) with strong format compliance (87.78% format accuracy)
+- Format accuracy improved significantly from steps 0-1 (9-22%) to steps 2-6 (25-88%)
+- Most steps show 72-91% format failures; step 2 reduced this to 12.22%
+- Step 2: 24% correct, 64% wrong answer (format correct but answer incorrect), 12% format failure
+- Accuracy variation: 2.80% (step 1) to 24.00% (step 2)

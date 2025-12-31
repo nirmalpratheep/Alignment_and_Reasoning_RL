@@ -1,7 +1,7 @@
 ---
 # Model Configuration
 model:
-  name: "results/checkpoints/checkpoint_6000"  # Load SFT checkpoint
+  name: "checkpoint/step_7500/"  # Load SFT checkpoint
   dtype: "bfloat16"
   trust_remote_code: true
 
