@@ -375,7 +375,7 @@ def persistent_eval_worker(
                     "eval/accuracy": metrics['accuracy'],
                     "eval/format_accuracy": metrics['format_accuracy'],
                     "eval/num_correct": metrics['correct'],
-                    "eval/num_format_correct": metrics['num_format_correct'],
+                    "eval/num_format_correct": metrics['format_correct'],
                     "eval/num_evaluated": metrics['num_evaluated'],
                     "eval/avg_response_length": metrics['avg_response_length'],
                     "eval/avg_response_length_correct": metrics['avg_response_length_correct'],
