@@ -18,7 +18,7 @@ training:
 evaluation:
   device: "cuda:1"  # GPU 1: Dedicated for evaluation
   batch_size: 240
-  num_eval_samples: 1000  # 500 samples for reliable evaluation
+  num_eval_samples: 5000  # 500 samples for reliable evaluation
   temperature: 1.0
   top_p: 1.0
   max_tokens: 2048
