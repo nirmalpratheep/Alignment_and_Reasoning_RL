@@ -76,7 +76,8 @@ def training_loop(
     config: Config,
     train_data: list,
     tokenizer: AutoTokenizer,
-    eval_queue: Optional[mp.Queue] = None
+    eval_queue: Optional[mp.Queue] = None,
+    stop_signal: Optional[mp.Event] = None
 ) -> None:
     """Main training loop on GPU 0 with periodic training set evaluation.
     
@@ -142,6 +143,10 @@ def training_loop(
     progress_bar = tqdm(total=num_training_steps, desc="Training")
     
     for example in train_data[:num_training_steps]:
+        # Check for early stop signal
+        if stop_signal and stop_signal.is_set():
+            print(f"\n⚠ Early stop signal received at step {train_step}")
+            break
         # Tokenize
         from training_utils import prepare_sft_batch
         batch = prepare_sft_batch([example], tokenizer)

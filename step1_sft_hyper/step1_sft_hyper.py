@@ -539,41 +539,38 @@ def objective(trial: optuna.Trial) -> float:
         # Use wrapper queue - routes checkpoints to shared queue with trial_id
         eval_queue_wrapper = TrialCheckpointQueue(_shared_checkpoint_queue, trial_id)
         
-        # Run training - checkpoints will go directly to shared queue
-        training_loop(config, train_data, tokenizer, eval_queue_wrapper)
+        # Create stop signal for early termination
+        stop_signal = mp.Event()
         
-        # Wait for evaluation result
-        final_loss = float('inf')  # Default to high loss if eval fails
-        max_wait_time = 300  # 5 minutes
-        wait_interval = 2  # Check every 2 seconds
-        waited = 0
+        # Store stop signal in shared dict for eval worker access
+        trial_stop_key = f"__stop_signal_{trial_id}__"
+        _shared_result_dict[trial_stop_key] = stop_signal
         
-        print(f"\nWaiting for evaluation result (timeout: {max_wait_time}s)...")
-        while waited < max_wait_time:
-            if trial_id in _shared_result_dict:
-                result = _shared_result_dict[trial_id]
-                final_loss = result.get("eval_loss", float('inf'))
-                if "error" in result:
-                    print(f"⚠ Evaluation had error: {result['error']}")
-                print(f"✓ Received evaluation result: eval_loss={final_loss:.4f}")
-                break
-            time.sleep(wait_interval)
-            waited += wait_interval
-            if waited % 10 == 0:
-                print(f"  Still waiting... ({waited}/{max_wait_time}s)")
+        # Run training in background (async on GPU0)
+        print(f"\nStarting async training on GPU0...")
+        training_thread = threading.Thread(
+            target=training_loop,
+            args=(config, train_data, tokenizer, eval_queue_wrapper, stop_signal),
+            daemon=True
+        )
+        training_thread.start()
         
-        if waited >= max_wait_time and trial_id not in _shared_result_dict:
-            print(f"⚠ Timeout waiting for evaluation result")
-            print(f"  Using default loss of inf")
-            _shared_result_dict[trial_id] = {"eval_loss": float('inf'), "error": "Timeout"}
+        # Wait for training to complete or be stopped by eval
+        training_thread.join(timeout=None)  # Wait indefinitely
+        
+        # Get final eval loss (last reported)
+        best_loss = _shared_result_dict.get(f"__best_loss_{trial_id}__", float('inf'))
+        
+        # Cleanup
+        if trial_stop_key in _shared_result_dict:
+            del _shared_result_dict[trial_stop_key]
+        if f"__best_loss_{trial_id}__" in _shared_result_dict:
+            del _shared_result_dict[f"__best_loss_{trial_id}__"]
         
         wandb.finish()
         
-        # Report to Optuna for pruning (lower loss is better)
-        trial.report(final_loss, step=FIXED_CONFIG["max_batches"])
-        
-        print(f"✓ Trial {trial_id} complete: eval_loss={final_loss:.4f}")
-        return final_loss
+        print(f"✓ Trial {trial_id} complete: best_eval_loss={best_loss:.4f}")
+        return best_loss
         
     except Exception as e:
         print(f"⚠ Trial {trial_id} failed: {e}")
