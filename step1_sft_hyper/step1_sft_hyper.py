@@ -354,14 +354,14 @@ def persistent_eval_worker(
                 
                 # Log to the same wandb run as the training trial
                 # Wait for training to set W&B run info
-                run_info_key = "__wandb_run_info__"
+                run_info_key = f"__wandb_run_info_{trial_id}__"
                 run_info = None
                 max_wait = 60  # Wait up to 60 seconds for run info
                 waited = 0
                 
                 while waited < max_wait and run_info is None:
                     if run_info_key in result_dict:
-                        run_info = result_dict[run_info_key].get(trial_id)
+                        run_info = result_dict[run_info_key]
                     if run_info is None:
                         time.sleep(1)
                         waited += 1
@@ -524,10 +524,9 @@ def objective(trial: optuna.Trial) -> float:
         )
         
         # Store W&B run info in shared dict for eval worker
-        run_info_key = "__wandb_run_info__"
-        if run_info_key not in _shared_result_dict:
-            _shared_result_dict[run_info_key] = {}
-        _shared_result_dict[run_info_key][trial_id] = {
+        # Use flat key to avoid mp.Manager nested dict update issues
+        run_info_key = f"__wandb_run_info_{trial_id}__"
+        _shared_result_dict[run_info_key] = {
             "id": wandb.run.id,
             "name": wandb.run.name,
             "project": wandb.run.project,
@@ -603,6 +602,9 @@ def objective(trial: optuna.Trial) -> float:
             del _shared_result_dict[trial_stop_key]
         if f"__best_loss_{trial_id}__" in _shared_result_dict:
             del _shared_result_dict[f"__best_loss_{trial_id}__"]
+        run_info_key = f"__wandb_run_info_{trial_id}__"
+        if run_info_key in _shared_result_dict:
+            del _shared_result_dict[run_info_key]
         
         wandb.finish()
         
