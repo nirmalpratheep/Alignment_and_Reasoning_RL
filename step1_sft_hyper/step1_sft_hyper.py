@@ -365,25 +365,17 @@ def persistent_eval_worker(
                         project=run_info.get("project", eval_config.get("logging", {}).get("wandb_project", "math-sft-optuna-asha")),
                         name=run_info.get("name"),
                         id=run_info.get("id"),  # Use the stored run ID
-                        resume="allow",  # Resume the existing run
-                        reinit=True
-                    )
-                else:
-                    # Fallback: create new run if info not available yet
-                    # This might happen if eval runs before training sets the info
-                    wandb.init(
-                        project=eval_config.get("logging", {}).get("wandb_project", "math-sft-optuna-asha"),
-                        name=f"trial_{trial_id}",
-                        group="optuna_search",
+                        resume="allow",
                         reinit=True
                     )
                 
+                # Log to W&B (use existing trial run)
                 wandb.log({
                     "eval/loss": eval_loss,
                     "eval/accuracy": metrics['accuracy'],
                     "eval/format_accuracy": metrics['format_accuracy'],
                     "eval/num_correct": metrics['correct'],
-                    "eval/num_format_correct": metrics['format_correct'],
+                    "eval/num_format_correct": metrics['num_format_correct'],
                     "eval/num_evaluated": metrics['num_evaluated'],
                     "eval/avg_response_length": metrics['avg_response_length'],
                     "eval/avg_response_length_correct": metrics['avg_response_length_correct'],
@@ -398,8 +390,6 @@ def persistent_eval_worker(
                     "eval/category_3_format_failure_pct": (category_3_count / total * 100) if total > 0 else 0.0,
                     "trial_id": trial_id,
                 })
-                
-                wandb.finish()
                 
                 # Store result (include categorization and eval_loss for reference)
                 metrics_with_categorization = {
