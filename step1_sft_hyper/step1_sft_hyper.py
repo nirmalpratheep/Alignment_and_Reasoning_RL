@@ -146,13 +146,13 @@ def compute_eval_loss(checkpoint_path: str, val_data: list, tokenizer, eval_conf
         checkpoint_file = Path(checkpoint_path) / "pytorch_model.bin"
         if checkpoint_file.exists():
             state_dict = torch.load(checkpoint_file, map_location=device)
-            model.load_state_dict(state_dict)
+            model.load_state_dict(state_dict, strict=False)  # strict=False for tied weights
         else:
             # Try safetensors
             from safetensors.torch import load_file
             checkpoint_file = Path(checkpoint_path) / "model.safetensors"
             state_dict = load_file(str(checkpoint_file))
-            model.load_state_dict(state_dict)
+            model.load_state_dict(state_dict, strict=False)  # strict=False for tied weights
     
     model.eval()
     
