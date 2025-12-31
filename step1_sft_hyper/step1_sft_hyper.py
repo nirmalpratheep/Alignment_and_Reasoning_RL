@@ -28,25 +28,32 @@ sys.path.insert(0, str(project_root))
 if __name__ == "__main__":
     mp.set_start_method('spawn', force=True)
 
-# Search space bounds
-LR_MIN, LR_MAX = 5e-6, 1e-4
-BATCH_SIZE_CHOICES = [ 32, 64, 128, 256]
-WEIGHT_DECAY_MIN, WEIGHT_DECAY_MAX = 0.0, 0.1
+# Load base configuration from YAML
+with open("config/sft_hyper_config.yaml", "r") as f:
+    BASE_CONFIG = yaml.safe_load(f)
 
-# Fixed parameters
+# Search space bounds (from config)
+LR_MIN = BASE_CONFIG["search_space"]["learning_rate"]["min"]
+LR_MAX = BASE_CONFIG["search_space"]["learning_rate"]["max"]
+BATCH_SIZE_CHOICES = BASE_CONFIG["search_space"]["batch_size"]["choices"]
+WEIGHT_DECAY_MIN = BASE_CONFIG["search_space"]["weight_decay"]["min"]
+WEIGHT_DECAY_MAX = BASE_CONFIG["search_space"]["weight_decay"]["max"]
+
+
+# Fixed parameters (from config)
 FIXED_CONFIG = {
-    "max_batches": 50000,  # Very high limit - allow full dataset training
-    "eval_every": 1000,     # Evaluate every 1000 batches
-    "warmup_steps": 50,
-    "num_eval_samples": 500,  # 500 samples for reliable evaluation
+    "max_batches": BASE_CONFIG["training"]["max_batches"],
+    "eval_every": BASE_CONFIG["training"]["eval_every"],
+    "warmup_steps": BASE_CONFIG["training"]["warmup_steps"],
+    "num_eval_samples": BASE_CONFIG["evaluation"]["num_eval_samples"],
 }
 
-# Number of optimization trials
-N_TRIALS = 30  # More trials for ASHA
+# Number of optimization trials (from config)
+N_TRIALS = BASE_CONFIG["optimization"]["n_trials"]
 
-# Early stopping config
-EARLY_STOPPING_PATIENCE = 3  # Stop if no improvement for 3 evaluations
-EARLY_STOPPING_MIN_DELTA = 0.001  # Minimum improvement threshold
+# Early stopping config (from config)
+EARLY_STOPPING_PATIENCE = BASE_CONFIG["early_stopping"]["patience"]
+EARLY_STOPPING_MIN_DELTA = BASE_CONFIG["early_stopping"]["min_delta"]
 
 # Global shared queues for persistent eval worker
 _shared_checkpoint_queue: Optional[mp.Queue] = None
@@ -406,6 +413,39 @@ def persistent_eval_worker(
                 }
                 result_dict[trial_id] = metrics_with_categorization
                 
+                # Early stopping logic
+                best_loss_key = f"__best_loss_{trial_id}__"
+                patience_key = f"__patience_{trial_id}__"
+                
+                # Initialize on first eval
+                if best_loss_key not in result_dict:
+                    result_dict[best_loss_key] = float('inf')
+                    result_dict[patience_key] = 0
+                
+                best_loss = result_dict[best_loss_key]
+                patience_counter = result_dict[patience_key]
+                
+                # Check improvement
+                if eval_loss < best_loss - EARLY_STOPPING_MIN_DELTA:
+                    result_dict[best_loss_key] = eval_loss
+                    result_dict[patience_key] = 0
+                    print(f"  ✓ Improved! New best: {eval_loss:.4f} (patience reset)")
+                else:
+                    patience_counter += 1
+                    result_dict[patience_key] = patience_counter
+                    print(f"  ⚠ No improvement (patience: {patience_counter}/{EARLY_STOPPING_PATIENCE})")
+                    
+                    if patience_counter >= EARLY_STOPPING_PATIENCE:
+                        print(f"\n⚠ EARLY STOPPING: Trial {trial_id} patience exceeded")
+                        print(f"  Best eval loss: {result_dict[best_loss_key]:.4f}")
+                        
+                        # Set stop signal
+                        stop_signal_key = f"__stop_signal_{trial_id}__"
+                        if stop_signal_key in result_dict:
+                            stop_signal = result_dict[stop_signal_key]
+                            stop_signal.set()
+                            print(f"  ✓ Stop signal sent to training")
+                
                 print(f"✓ Evaluation complete for Trial {trial_id}:")
                 print(f"  - Eval Loss: {eval_loss:.4f}")
                 print(f"  - Accuracy: {metrics['accuracy']:.3f}")
@@ -539,8 +579,8 @@ def objective(trial: optuna.Trial) -> float:
         # Use wrapper queue - routes checkpoints to shared queue with trial_id
         eval_queue_wrapper = TrialCheckpointQueue(_shared_checkpoint_queue, trial_id)
         
-        # Create stop signal for early termination
-        stop_signal = mp.Event()
+        # Create stop signal for early termination (use manager for proper sharing)
+        stop_signal = _shared_result_manager.Event()
         
         # Store stop signal in shared dict for eval worker access
         trial_stop_key = f"__stop_signal_{trial_id}__"
