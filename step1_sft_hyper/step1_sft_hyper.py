@@ -35,10 +35,10 @@ WEIGHT_DECAY_MIN, WEIGHT_DECAY_MAX = 0.0, 0.1
 
 # Fixed parameters
 FIXED_CONFIG = {
-    "max_batches": 1000,  # Increased for early stopping
-    "eval_every": 100,     # Evaluate every 100 steps for early stopping
+    "max_batches": 1000,  # Train for 1000 batches
+    "eval_every": 999999,  # Only eval at end (single final evaluation)
     "warmup_steps": 50,
-    "num_eval_samples": 500,  # More samples for reliable early stopping
+    "num_eval_samples": 500,  # 500 samples for reliable final evaluation
 }
 
 # Number of optimization trials
@@ -99,7 +99,7 @@ def create_config(lr: float, batch_size: int, weight_decay: float, trial_id: int
         },
         "checkpointing": {
             "output_dir": f"results/optuna/trial_{trial_id}",
-            "queue_maxsize": 2,
+            "queue_maxsize": 10,  # Increased for periodic checkpoints
             "temp_dir": f"/tmp/qwen_optuna_{trial_id}"
         },
         "logging": {
@@ -549,7 +549,7 @@ def main():
     print("SETTING UP PERSISTENT EVALUATION WORKER")
     print("="*80)
     manager = mp.Manager()
-    _shared_checkpoint_queue = manager.Queue(maxsize=10)  # Queue for (trial_id, checkpoint_path)
+    _shared_checkpoint_queue = manager.Queue(maxsize=50)  # Increased for multiple trials with periodic checkpoints
     _shared_result_dict = manager.dict()  # Shared dict: {trial_id: metrics}
     _shared_result_manager = manager
     
