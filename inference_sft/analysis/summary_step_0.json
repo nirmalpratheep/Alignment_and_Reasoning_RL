@@ -1,0 +1,55 @@
+{
+  "eval_step": 0,
+  "total_examples": 5000,
+  "categorization": {
+    "correct": {
+      "count": 1303,
+      "percentage": 26.06
+    },
+    "wrong_answer": {
+      "count": 3201,
+      "percentage": 64.02
+    },
+    "format_failure": {
+      "count": 496,
+      "percentage": 9.92
+    }
+  },
+  "format_failure_analysis": {
+    "missing_think_close": {
+      "count": 360,
+      "percentage": 72.58064516129032
+    },
+    "missing_answer_open": {
+      "count": 327,
+      "percentage": 65.92741935483872
+    },
+    "missing_answer_close": {
+      "count": 449,
+      "percentage": 90.5241935483871
+    },
+    "wrong_order": {
+      "count": 0,
+      "percentage": 0.0
+    },
+    "incomplete_generation": {
+      "count": 449,
+      "percentage": 90.5241935483871
+    }
+  },
+  "metrics": {
+    "accuracy": 0.2606,
+    "format_accuracy": 0.9008,
+    "num_evaluated": 5000,
+    "correct": 1303,
+    "format_correct": 4504,
+    "avg_response_length": 292.5392,
+    "avg_response_length_correct": 164.01841903300075,
+    "avg_response_length_incorrect": 337.83608331079256,
+    "avg_token_entropy": 6.273670852847898
+  },
+  "conclusions": {
+    "format_failures": "Issue: BASE MODEL (incomplete generation). Model runs out of tokens.",
+    "wrong_answers": "Parser working correctly. Issues with model's mathematical reasoning."
+  }
+}

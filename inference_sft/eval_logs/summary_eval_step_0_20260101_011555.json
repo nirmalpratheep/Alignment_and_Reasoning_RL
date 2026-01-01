@@ -1,0 +1,9 @@
+{
+  "num_test_cases": 5000,
+  "avg_response_length": 292.5392,
+  "avg_response_length_correct": 164.01841903300075,
+  "avg_response_length_incorrect": 337.83608331079256,
+  "avg_token_entropy": 6.273670852847898,
+  "num_correct": 1303,
+  "num_incorrect": 3697
+}
