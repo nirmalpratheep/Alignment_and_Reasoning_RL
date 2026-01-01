@@ -53,7 +53,38 @@ def parse_args():
 
 def load_config(config_path: str) -> dict:
     """Load configuration from YAML file."""
-    with open(config_path, 'r') as f:
+    # Resolve path: try multiple locations
+    original_path = config_path
+    if not Path(config_path).is_absolute():
+        # Try in order:
+        # 1. Current working directory
+        # 2. step3_GRPO directory (where this script is)
+        # 3. Project root
+        script_dir = Path(__file__).parent
+        possible_paths = [
+            Path(config_path),  # Current working directory
+            script_dir / config_path,  # Relative to script location
+            project_root / config_path,  # Project root
+            project_root / "step3_GRPO" / config_path,  # Explicit step3_GRPO path
+        ]
+        
+        resolved_path = None
+        for path in possible_paths:
+            if path.exists():
+                resolved_path = path
+                break
+        
+        if resolved_path is None:
+            # Use script directory as fallback
+            resolved_path = script_dir / original_path
+        config_path = resolved_path
+    else:
+        config_path = Path(config_path)
+    
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config file not found. Tried: {original_path}")
+    
+    with open(str(config_path), 'r') as f:
         config = yaml.safe_load(f)
     return config
 
@@ -83,7 +114,10 @@ def prepare_dataset(config: dict, rank: int) -> tuple:
     
     # Load prompt template
     prompt_file = config['data']['prompt_file']
-    with open(prompt_file, 'r') as f:
+    # Resolve path relative to project root if not absolute
+    if not Path(prompt_file).is_absolute():
+        prompt_file = project_root / prompt_file
+    with open(str(prompt_file), 'r') as f:
         prompt_template = f.read()
     
     if rank == 0:
@@ -186,8 +220,15 @@ def main():
     train_data, test_data, prompt_template = prepare_dataset(config, rank)
     
     # Load model and tokenizer
+    model_name = config['model']['name']
+    # Resolve model path relative to project root if it's a local path
+    if not Path(model_name).is_absolute():
+        model_path = project_root / model_name
+        if model_path.exists():
+            model_name = str(model_path)
+    
     model, tokenizer = load_model_and_tokenizer(
-        model_name=config['model']['name'],
+        model_name=model_name,
         dtype=config['model']['dtype'],
         attn_implementation=config['model']['attn_implementation'],
         use_compile=config['model']['torch_compile'],
@@ -270,9 +311,13 @@ def main():
         eval_interval = config['training']['eval_every']
         if rank == 1 and global_step % eval_interval == 0:
             # Save checkpoint first
+            output_dir = config['checkpointing']['output_dir']
+            # Resolve path relative to project root if not absolute
+            if not Path(output_dir).is_absolute():
+                output_dir = project_root / output_dir
             checkpoint_path = save_fsdp_checkpoint(
                 fsdp_model, optimizer, global_step,
-                config['checkpointing']['output_dir'],
+                str(output_dir),
                 rank,
             )
             
@@ -319,9 +364,13 @@ def main():
     
     # Final checkpoint
     if rank == 0:
+        output_dir = config['checkpointing']['output_dir']
+        # Resolve path relative to project root if not absolute
+        if not Path(output_dir).is_absolute():
+            output_dir = project_root / output_dir
         save_fsdp_checkpoint(
             fsdp_model, optimizer, global_step,
-            config['checkpointing']['output_dir'],
+            str(output_dir),
             rank,
         )
     

@@ -5,6 +5,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from dataclasses import dataclass
+from functools import partial
 
 import torch
 import torch.distributed as dist
@@ -16,7 +17,8 @@ from torch.distributed.fsdp import (
 )
 from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
 from transformers import AutoModelForCausalLM, AutoTokenizer
-from transformers.models.qwen2 import Qwen2DecoderLayer
+from transformers.models.qwen2.modeling_qwen2 import Qwen2DecoderLayer
+from transformers.utils import is_flash_attn_2_available
 import wandb
 
 # Add project root to path
@@ -82,7 +84,8 @@ def create_fsdp_model(
         FSDP-wrapped model
     """
     # Auto-wrap policy for transformer layers
-    auto_wrap_policy = transformer_auto_wrap_policy(
+    auto_wrap_policy = partial(
+        transformer_auto_wrap_policy,
         transformer_layer_cls={Qwen2DecoderLayer},  # Qwen2 specific
     )
     
@@ -146,10 +149,20 @@ def load_model_and_tokenizer(
         print(f"  attention: {attn_implementation}")
         print(f"  compile: {use_compile} (mode={compile_mode})")
     
+
+    
+    # Check Flash Attention availability
+    if attn_implementation == "flash_attention_2" and not is_flash_attn_2_available():
+        if rank == 0:
+            print(f"WARNING: Flash Attention 2 requested but not installed. Falling back to 'sdpa'.")
+        attn_implementation = "sdpa"
+
     # Load tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
         model_name,
         trust_remote_code=True,
+        fix_mistral_regex=True,
+        padding_side='left',  # Required for decoder-only models
     )
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -158,7 +171,7 @@ def load_model_and_tokenizer(
     torch_dtype = getattr(torch, dtype)
     model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        torch_dtype=torch_dtype,
+        dtype=torch_dtype,  # Use 'dtype' instead of deprecated 'torch_dtype'
         attn_implementation=attn_implementation,
         trust_remote_code=True,
         device_map=None,  # FSDP will handle device placement
@@ -171,16 +184,18 @@ def load_model_and_tokenizer(
             print("  ✓ Gradient checkpointing enabled")
     
     # Compile model for H100 optimization
-    if use_compile:
-        if rank == 0:
-            print(f"  Compiling model (mode={compile_mode})...")
-        model = torch.compile(
-            model,
-            mode=compile_mode,
-            fullgraph=False,  # More compatible
-        )
-        if rank == 0:
-            print("  ✓ Model compiled")
+    # NOTE: Disabled because torch.compile before FSDP causes issues with parameter gathering
+    # You can optionally compile after FSDP wrapping if needed
+    # if use_compile:
+    #     if rank == 0:
+    #         print(f"  Compiling model (mode={compile_mode})...")
+    #     model = torch.compile(
+    #         model,
+    #         mode=compile_mode,
+    #         fullgraph=False,  # More compatible
+    #     )
+    #     if rank == 0:
+    #         print("  ✓ Model compiled")
     
     if rank == 0:
         num_params = sum(p.numel() for p in model.parameters())
@@ -232,19 +247,23 @@ def generate_completions(
         max_length=2048,
     ).to(f"cuda:{rank}")
     
-    # Generate
+    # Generate - Need to gather sharded parameters across GPUs
+    # Now that torch.compile is disabled, summon_full_params works correctly
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    
     with torch.no_grad():
-        outputs = model.module.generate(  # Access unwrapped model
-            **inputs,
-            max_new_tokens=max_tokens,
-            min_new_tokens=min_tokens,
-            temperature=temperature,
-            do_sample=True,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-            return_dict_in_generate=True,
-            output_scores=True,
-        )
+        with FSDP.summon_full_params(model, recurse=True, writeback=False):
+            outputs = model.generate(  # Use FSDP model with gathered params
+                **inputs,
+                max_new_tokens=max_tokens,
+                min_new_tokens=min_tokens,
+                temperature=temperature,
+                do_sample=True,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                return_dict_in_generate=True,
+                output_scores=True,
+            )
     
     # Decode completions
     generated_ids = outputs.sequences[:, inputs['input_ids'].shape[1]:]
