@@ -1,0 +1,64 @@
+---
+# FSDP Configuration for 2× H100 GPUs
+fsdp:
+  world_size: 2
+  sharding_strategy: "FULL_SHARD"
+  auto_wrap_policy: "transformer"
+  mixed_precision: "bfloat16"
+  forward_prefetch: true
+  limit_all_gathers: true
+  sync_module_states: true
+
+# Model Configuration
+model:
+  name: "checkpoint/Qwen2.5-Nirmal-Math-1.5B-Instruct"  # SFT checkpoint
+  dtype: "bfloat16"
+  trust_remote_code: true
+  attn_implementation: "flash_attention_2"  # H100 optimization
+  torch_compile: true
+  compile_mode: "max-autotune"
+
+# Training Configuration
+training:
+  learning_rate: 1.0e-5
+  weight_decay: 0.0
+  betas: [0.9, 0.95]
+  batch_size_per_gpu: 128        # 256 total across 2 GPUs
+  gradient_accumulation_steps: 64  # Microbatch = 2 per GPU
+  max_steps: 200
+  eval_every: 50
+  max_grad_norm: 1.0
+  
+# GRPO-Specific Parameters
+grpo:
+  group_size: 8                    # K completions per prompt
+  temperature: 1.0
+  max_tokens: 1024
+  min_tokens: 4
+  kl_coef: 0.0                     # KL penalty coefficient
+  advantage_eps: 1.0e-6
+  use_std_normalization: true
+  
+# Data Configuration
+data:
+  prompt_file: "prompts/rl_zero.prompt"
+  num_train_samples: null          # Use all training data
+  
+# Evaluation Configuration
+evaluation:
+  batch_size: 320
+  num_samples: 1000                # Samples to evaluate (for speed)
+  temperature: 1.0
+  top_p: 1.0
+  max_tokens: 1024
+  
+# Checkpointing
+checkpointing:
+  output_dir: "results/grpo_fsdp_checkpoints"
+  save_total_limit: 3
+  
+# Logging
+logging:
+  wandb_project: "math-grpo-h100"
+  wandb_entity: null
+  log_every_steps: 1               # Log every step

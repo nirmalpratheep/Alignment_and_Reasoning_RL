@@ -5,9 +5,9 @@ description = "Alignment and Reasoning with RL for Math Problems"
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "transformers>=4.36.0",
+    "transformers>=4.44.0",      # FlashAttention-2 support
     "datasets>=2.16.0",
-    "torch>=2.1.0",
+    "torch>=2.4.0",              # FSDP stability + compile
     "accelerate>=0.26.0",
     "tqdm>=4.66.0",
     "sympy>=1.12",
@@ -21,6 +21,8 @@ dependencies = [
     "matplotlib>=3.10.8",
     "optuna>=4.6.0",
     "trl>=0.12.0",
+    "flash-attn>=2.5.0",         # H100 FlashAttention-2
+    "pyyaml>=6.0",               # For config loading
 ]
 
 [project.optional-dependencies]
