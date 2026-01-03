@@ -23,8 +23,8 @@ training:
   learning_rate: 1.0e-5
   weight_decay: 0.0
   betas: [0.9, 0.95]
-  batch_size_per_gpu: 128        # train_batch_size=256 / 2 GPUs = 128 per GPU
-  gradient_accumulation_steps: 128  # microbatch size is 2, will fit on H100
+  batch_size_per_gpu: 16         # Reduced to 16 for faster iteration (16×8=128 completions)
+  gradient_accumulation_steps: 16  # Reduced to match (effective batch = 16×16×8 = 2048)
   max_steps: 200
   eval_every: 50
   max_grad_norm: 1.0

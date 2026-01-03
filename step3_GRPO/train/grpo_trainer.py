@@ -125,43 +125,51 @@ def generate_completions_batch(
     
     model.eval()
     
-    completions = []
+    all_completions = []
+    
+    # Generate in chunks to avoid OOM with large batches
+    # With FSDP's summon_full_params, we need to be conservative with batch size
+    chunk_size = 64  # Generate 64 prompts at a time
     
     with torch.no_grad():
-        # Tokenize prompts
-        inputs = tokenizer(
-            prompts,
-            return_tensors="pt",
-            padding=True,
-            truncation=True,
-            max_length=512
-        ).to(device)
-        
         # Use FSDP's summon_full_params to temporarily gather all parameters for generation
         # This is necessary because .generate() doesn't work with sharded parameters
         with FSDP.summon_full_params(model, writeback=False):
-            # Generate completions with sampling
-            outputs = model.generate(
-                input_ids=inputs['input_ids'],
-                attention_mask=inputs['attention_mask'],
-                max_new_tokens=config.grpo.max_tokens,
-                min_new_tokens=config.grpo.get('min_tokens', 4),
-                temperature=config.grpo.temperature,
-                do_sample=True,
-                top_p=1.0,
-                pad_token_id=tokenizer.pad_token_id,
-                eos_token_id=tokenizer.eos_token_id,
-            )
-        
-        # Decode only the generated part (exclude prompt)
-        for i, output_ids in enumerate(outputs):
-            prompt_length = inputs['input_ids'][i].shape[0]
-            generated_ids = output_ids[prompt_length:]
-            completion = tokenizer.decode(generated_ids, skip_special_tokens=False)
-            completions.append(completion)
+            for chunk_start in range(0, len(prompts), chunk_size):
+                chunk_end = min(chunk_start + chunk_size, len(prompts))
+                chunk_prompts = prompts[chunk_start:chunk_end]
+                
+                # Tokenize prompts
+                inputs = tokenizer(
+                    chunk_prompts,
+                    return_tensors="pt",
+                    padding=True,
+                    truncation=True,
+                    max_length=512
+                ).to(device)
+                
+                # Generate completions with sampling
+                outputs = model.generate(
+                    input_ids=inputs['input_ids'],
+                    attention_mask=inputs['attention_mask'],
+                    max_new_tokens=config.grpo.max_tokens,
+                    min_new_tokens=config.grpo.get('min_tokens', 4),
+                    temperature=config.grpo.temperature,
+                    do_sample=True,
+                    top_p=1.0,
+                    pad_token_id=tokenizer.pad_token_id,
+                    eos_token_id=tokenizer.eos_token_id,
+                )
+                
+                # Decode only the generated part (exclude prompt)
+                for i, output_ids in enumerate(outputs):
+                    prompt_length = inputs['input_ids'][i].shape[0]
+                    generated_ids = output_ids[prompt_length:]
+                    completion = tokenizer.decode(generated_ids, skip_special_tokens=False)
+                    all_completions.append(completion)
     
     model.train()
-    return completions
+    return all_completions
 
 
 def compute_log_probs(
