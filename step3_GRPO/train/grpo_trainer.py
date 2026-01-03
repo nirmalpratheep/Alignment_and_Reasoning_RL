@@ -288,30 +288,41 @@ def grpo_training_step(
     
     # Generate all completions in one large batch
     # This is much more efficient than generating K at a time
-    print_rank_0(f"Generating {len(all_prompts)} completions ({len(prompts)} problems × {K} samples)...")
+    print_rank_0(f"[Step {step}] Generating {len(all_prompts)} completions ({len(prompts)} problems × {K} samples)...")
+    import time
+    gen_start = time.time()
     all_completions = generate_completions_batch(
         model, all_prompts, tokenizer, config, device
     )
+    gen_time = time.time() - gen_start
+    print_rank_0(f"[Step {step}] ✓ Generation complete ({gen_time:.1f}s, {len(all_completions)/gen_time:.1f} completions/s)")
     
     # === Phase 2: Compute rewards using existing math reward function ===
+    print_rank_0(f"[Step {step}] Computing rewards...")
+    reward_start = time.time()
     rewards_list = compute_math_rewards(all_completions, all_ground_truths)
     rewards = torch.tensor(rewards_list, dtype=torch.float32, device=device)
+    reward_time = time.time() - reward_start
+    print_rank_0(f"[Step {step}] ✓ Rewards computed ({reward_time:.1f}s, mean={rewards.mean().item():.3f})")
     
     # === Phase 3: Compute advantages using existing group advantage function ===
+    print_rank_0(f"[Step {step}] Computing advantages...")
     advantages, adv_stats = compute_group_advantages(
         rewards=rewards,
         group_size=K,
         eps=config.grpo.advantage_eps,
         use_std_normalization=config.grpo.use_std_normalization
     )
+    print_rank_0(f"[Step {step}] ✓ Advantages computed (mean={advantages.mean().item():.3f})")
     
     # === Phase 4: Policy gradient update ===
+    print_rank_0(f"[Step {step}] Computing policy gradients...")
     model.train()
     
     # Compute current log probs (requires gradient)
     policy_log_probs = []
     
-    for prompt, completion in zip(all_prompts, all_completions):
+    for idx, (prompt, completion) in enumerate(zip(all_prompts, all_completions)):
         # Tokenize
         full_text = prompt + completion
         inputs = tokenizer(
@@ -348,6 +359,7 @@ def grpo_training_step(
         policy_log_probs.append(completion_log_prob)
     
     policy_log_probs = torch.stack(policy_log_probs)
+    print_rank_0(f"[Step {step}] ✓ Policy log probs computed")
     
     # GRPO loss: -E[A * log π(y|x)]
     loss = -(advantages.detach() * policy_log_probs).mean()
@@ -357,7 +369,10 @@ def grpo_training_step(
     loss = loss / grad_accum_steps
     
     # Backward pass (accumulate gradients)
+    print_rank_0(f"[Step {step}] Computing gradients (loss={loss.item()*grad_accum_steps:.4f})...")
     loss.backward()
+    print_rank_0(f"[Step {step}] ✓ Backward pass complete")
+
     
     # Return unscaled loss for logging
     metrics = {
@@ -425,6 +440,10 @@ def grpo_training_loop(
                 break
             
             # GRPO training step (computes loss and backward, but doesn't update yet)
+            print_rank_0(f"\n{'='*70}")
+            print_rank_0(f"Microbatch {accum_step + 1}/{grad_accum_steps} (GRPO step will be {global_step + 1}/{max_steps})")
+            print_rank_0(f"{'='*70}")
+            
             metrics = grpo_training_step(
                 model=model,
                 batch=batch,
@@ -436,17 +455,26 @@ def grpo_training_loop(
             )
             
             accum_step += 1
+            print_rank_0(f"✓ Microbatch {accum_step}/{grad_accum_steps} complete")
             
             # Only update weights after accumulating enough gradients
             if accum_step >= grad_accum_steps:
+                print_rank_0(f"\n{'='*70}")
+                print_rank_0(f"UPDATING WEIGHTS (GRPO Step {global_step + 1}/{max_steps})")
+                print_rank_0(f"{'='*70}")
+                
                 # Gradient clipping
                 if hasattr(config.training, 'max_grad_norm'):
                     torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
+                    print_rank_0(f"✓ Gradients clipped")
                 
                 # Update weights
                 optimizer.step()
+                print_rank_0(f"✓ Weights updated")
                 optimizer.zero_grad()
+                print_rank_0(f"✓ Gradients zeroed")
                 scheduler.step()
+                print_rank_0(f"✓ Learning rate: {scheduler.get_last_lr()[0]:.2e}")
                 
                 # Reset accumulation counter
                 accum_step = 0
