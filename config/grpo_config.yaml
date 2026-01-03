@@ -23,21 +23,23 @@ training:
   learning_rate: 1.0e-5
   weight_decay: 0.0
   betas: [0.9, 0.95]
-  batch_size_per_gpu: 512        # Increased from 128 to use more memory
-  gradient_accumulation_steps: 16  # Reduced from 64 (effective batch still large)
+  batch_size_per_gpu: 128        # train_batch_size=256 / 2 GPUs = 128 per GPU
+  gradient_accumulation_steps: 128  # microbatch size is 2, will fit on H100
   max_steps: 200
   eval_every: 50
   max_grad_norm: 1.0
   
 # GRPO-Specific Parameters
 grpo:
-  group_size: 16                   # Increased from 8 for more samples per prompt
-  temperature: 1.0
-  max_tokens: 1024
-  min_tokens: 4
+  group_size: 8                    # K completions per prompt (from reference)
+  temperature: 1.0                 # sampling_temperature
+  max_tokens: 1024                 # sampling_max_tokens
+  min_tokens: 4                    # sampling_min_tokens (disallow empty responses)
   kl_coef: 0.0                     # KL penalty coefficient
-  advantage_eps: 1.0e-6
-  use_std_normalization: true
+  advantage_eps: 1.0e-6            # From reference
+  use_std_normalization: true      # From reference
+  loss_type: "reinforce_with_baseline"  # From reference (vs no_baseline or grpo_clip)
+  gpu_memory_utilization: 0.85     # For vLLM generation
   
 # Data Configuration
 data:

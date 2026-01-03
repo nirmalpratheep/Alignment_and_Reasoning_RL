@@ -275,21 +275,23 @@ def grpo_training_step(
     else:
         prompts = problems
     
-    # === Phase 1: Sample K completions per prompt ===
-    all_completions = []
+    # === Phase 1: Sample K completions per prompt (BATCHED) ===
+    # Instead of processing one prompt at a time, process all prompts together
+    # This maximizes GPU utilization
+    
+    # Repeat each prompt K times
     all_prompts = []
     all_ground_truths = []
-    
     for prompt, gt in zip(prompts, solutions):
-        # Generate K completions for this prompt
-        prompt_batch = [prompt] * K
-        completions = generate_completions_batch(
-            model, prompt_batch, tokenizer, config, device
-        )
-        
-        all_completions.extend(completions)
-        all_prompts.extend(prompt_batch)
+        all_prompts.extend([prompt] * K)
         all_ground_truths.extend([gt] * K)
+    
+    # Generate all completions in one large batch
+    # This is much more efficient than generating K at a time
+    print_rank_0(f"Generating {len(all_prompts)} completions ({len(prompts)} problems × {K} samples)...")
+    all_completions = generate_completions_batch(
+        model, all_prompts, tokenizer, config, device
+    )
     
     # === Phase 2: Compute rewards using existing math reward function ===
     rewards_list = compute_math_rewards(all_completions, all_ground_truths)
@@ -350,19 +352,16 @@ def grpo_training_step(
     # GRPO loss: -E[A * log π(y|x)]
     loss = -(advantages.detach() * policy_log_probs).mean()
     
-    # Backward pass
-    optimizer.zero_grad()
+    # Scale loss by gradient accumulation steps for proper averaging
+    grad_accum_steps = config.training.get('gradient_accumulation_steps', 1)
+    loss = loss / grad_accum_steps
+    
+    # Backward pass (accumulate gradients)
     loss.backward()
     
-    # Gradient clipping
-    if hasattr(config.training, 'max_grad_norm'):
-        torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
-    
-    optimizer.step()
-    
-    # Metrics (combine manual metrics with advantage stats)
+    # Return unscaled loss for logging
     metrics = {
-        'loss': loss.item(),
+        'loss': (loss.item() * grad_accum_steps),  # Unscale for logging
         **adv_stats,  # Includes reward stats and advantage stats
     }
     
@@ -379,7 +378,7 @@ def grpo_training_loop(
     world_size: int,
     local_rank: int
 ):
-    """Main GRPO training loop with final validation evaluation.
+    """Main GRPO training loop with gradient accumulation and final validation evaluation.
     
     Args:
         model: FSDP-wrapped model
@@ -401,9 +400,15 @@ def grpo_training_loop(
     max_steps = config.training.max_steps
     optimizer, scheduler = create_optimizer_and_scheduler(model, config, max_steps)
     
+    # Get gradient accumulation steps
+    grad_accum_steps = config.training.get('gradient_accumulation_steps', 1)
+    print_rank_0(f"Gradient accumulation steps: {grad_accum_steps}")
+    print_rank_0(f"Total training steps: {max_steps}")
+    
     # Training loop
     model.train()
     global_step = 0
+    accum_step = 0  # Track gradient accumulation
     
     progress_bar = tqdm(
         total=max_steps,
@@ -419,7 +424,7 @@ def grpo_training_loop(
             if global_step >= max_steps:
                 break
             
-            # GRPO training step
+            # GRPO training step (computes loss and backward, but doesn't update yet)
             metrics = grpo_training_step(
                 model=model,
                 batch=batch,
@@ -430,39 +435,54 @@ def grpo_training_loop(
                 step=global_step
             )
             
-            scheduler.step()
+            accum_step += 1
             
-            # Logging
-            if is_main_process() and global_step % config.logging.log_every_steps == 0:
-                wandb.log({
-                    'train/loss': metrics['loss'],
-                    'train/reward_mean': metrics['reward_mean'],
-                    'train/reward_std': metrics['reward_std'],
-                    'train/reward_max': metrics['reward_max'],
-                    'train/reward_min': metrics['reward_min'],
-                    'train/advantage_mean': metrics['advantage_mean'],
-                    'train/advantage_std': metrics['advantage_std'],
-                    'train/advantage_max': metrics['advantage_max'],
-                    'train/advantage_min': metrics['advantage_min'],
-                    'train/learning_rate': scheduler.get_last_lr()[0],
-                    'train/step': global_step,
-                })
-            
-            # Update progress
-            if is_main_process():
-                progress_bar.update(1)
-                progress_bar.set_postfix({
-                    'loss': f"{metrics['loss']:.4f}",
-                    'reward': f"{metrics['reward_mean']:.2f}"
-                })
-            
-            # Checkpointing
-            if global_step % config.training.eval_every == 0 and global_step > 0:
-                dist.barrier()  # Sync before checkpoint
-                save_fsdp_checkpoint(model, optimizer, global_step, config, rank)
-                dist.barrier()  # Sync after checkpoint
-            
-            global_step += 1
+            # Only update weights after accumulating enough gradients
+            if accum_step >= grad_accum_steps:
+                # Gradient clipping
+                if hasattr(config.training, 'max_grad_norm'):
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
+                
+                # Update weights
+                optimizer.step()
+                optimizer.zero_grad()
+                scheduler.step()
+                
+                # Reset accumulation counter
+                accum_step = 0
+                
+                # Increment global step (only after actual weight update)
+                global_step += 1
+                
+                # Logging
+                if is_main_process() and global_step % config.logging.log_every_steps == 0:
+                    wandb.log({
+                        'train/loss': metrics['loss'],
+                        'train/reward_mean': metrics['reward_mean'],
+                        'train/reward_std': metrics['reward_std'],
+                        'train/reward_max': metrics['reward_max'],
+                        'train/reward_min': metrics['reward_min'],
+                        'train/advantage_mean': metrics['advantage_mean'],
+                        'train/advantage_std': metrics['advantage_std'],
+                        'train/advantage_max': metrics['advantage_max'],
+                        'train/advantage_min': metrics['advantage_min'],
+                        'train/learning_rate': scheduler.get_last_lr()[0],
+                        'train/step': global_step,
+                    })
+                
+                # Update progress
+                if is_main_process():
+                    progress_bar.update(1)
+                    progress_bar.set_postfix({
+                        'loss': f"{metrics['loss']:.4f}",
+                        'reward': f"{metrics['reward_mean']:.2f}"
+                    })
+                
+                # Checkpointing
+                if global_step % config.training.eval_every == 0 and global_step > 0:
+                    dist.barrier()  # Sync before checkpoint
+                    save_fsdp_checkpoint(model, optimizer, global_step, config, rank)
+                    dist.barrier()  # Sync after checkpoint
         
         if global_step >= max_steps:
             break
