@@ -41,14 +41,14 @@ echo "GPU Status:"
 nvidia-smi --query-gpu=index,name,memory.total --format=csv,noheader
 echo ""
 
-# Navigate to step3_GRPO directory
-cd "$SCRIPT_DIR"
+# Navigate to project root (so relative paths in config work)
+cd "$PROJECT_ROOT"
 
 # Launch distributed training with torchrun
 echo "Launching training with torchrun..."
 echo "  - Number of GPUs: 2"
 echo "  - Launcher: step3_grpo.py"
-echo "  - Config: configs/fsdp_2gpu.yaml"
+echo "  - Config: config/grpo_config.yaml"
 echo ""
 
 # Parse command line arguments for test mode
@@ -76,8 +76,7 @@ $TORCHRUN_CMD \
     --node_rank=0 \
     --master_addr=localhost \
     --master_port=29500 \
-    step3_grpo.py \
-    --config configs/fsdp_2gpu.yaml \
+    step3_GRPO/step3_grpo.py \
     $TEST_MODE
 
 # Check if training failed

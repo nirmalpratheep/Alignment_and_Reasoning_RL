@@ -108,18 +108,31 @@ def validate_config(config: Config) -> None:
     # Validate training config
     if config.training.learning_rate <= 0:
         raise ValueError("Learning rate must be positive")
-    if config.training.batch_size <= 0:
+    
+    # Check for batch_size (SFT format) or batch_size_per_gpu (GRPO format)
+    batch_size = config.training.get('batch_size')
+    batch_size_per_gpu = config.training.get('batch_size_per_gpu')
+    if batch_size is not None and batch_size <= 0:
         raise ValueError("Batch size must be positive")
+    if batch_size_per_gpu is not None and batch_size_per_gpu <= 0:
+        raise ValueError("Batch size per GPU must be positive")
+    if batch_size is None and batch_size_per_gpu is None:
+        raise ValueError("Either batch_size or batch_size_per_gpu must be specified")
     
-    # Validate devices
+    # Validate devices (only for SFT configs that have device fields)
     valid_devices = ['cuda:0', 'cuda:1', 'cuda', 'cpu']
-    if config.training.device not in valid_devices:
-        raise ValueError(f"Invalid training device: {config.training.device}")
-    if config.evaluation.device not in valid_devices:
-        raise ValueError(f"Invalid evaluation device: {config.evaluation.device}")
+    training_device = config.training.get('device')
+    if training_device is not None and training_device not in valid_devices:
+        raise ValueError(f"Invalid training device: {training_device}")
     
-    # Validate checkpointing
-    if config.checkpointing.queue_maxsize <= 0:
-        raise ValueError("Queue maxsize must be positive")
+    eval_device = config.evaluation.get('device') if hasattr(config, 'evaluation') else None
+    if eval_device is not None and eval_device not in valid_devices:
+        raise ValueError(f"Invalid evaluation device: {eval_device}")
+    
+    # Validate checkpointing (only if queue_maxsize is specified)
+    if hasattr(config, 'checkpointing'):
+        queue_maxsize = config.checkpointing.get('queue_maxsize')
+        if queue_maxsize is not None and queue_maxsize <= 0:
+            raise ValueError("Queue maxsize must be positive")
     
     print("✓ Configuration validated successfully")

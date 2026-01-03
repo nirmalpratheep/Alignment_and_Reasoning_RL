@@ -14,7 +14,7 @@ model:
   name: "checkpoint/Qwen2.5-Nirmal-Math-1.5B-Instruct"  # SFT checkpoint
   dtype: "bfloat16"
   trust_remote_code: true
-  attn_implementation: "flash_attention_2"  # H100 optimization
+  # attn_implementation: "flash_attention_2"  # H100 optimization (requires: pip install flash-attn)
   torch_compile: true
   compile_mode: "max-autotune"
 
@@ -23,15 +23,15 @@ training:
   learning_rate: 1.0e-5
   weight_decay: 0.0
   betas: [0.9, 0.95]
-  batch_size_per_gpu: 128        # 256 total across 2 GPUs
-  gradient_accumulation_steps: 64  # Microbatch = 2 per GPU
+  batch_size_per_gpu: 512        # Increased from 128 to use more memory
+  gradient_accumulation_steps: 16  # Reduced from 64 (effective batch still large)
   max_steps: 200
   eval_every: 50
   max_grad_norm: 1.0
   
 # GRPO-Specific Parameters
 grpo:
-  group_size: 8                    # K completions per prompt
+  group_size: 16                   # Increased from 8 for more samples per prompt
   temperature: 1.0
   max_tokens: 1024
   min_tokens: 4

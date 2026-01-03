@@ -74,7 +74,8 @@ def main():
     if is_main_process():
         print("Loading configuration...")
     
-    config = load_config("config/grpo_config.yaml")
+    config_path = project_root / "config/grpo_config.yaml"
+    config = load_config(str(config_path))
     validate_config(config)
     
     if is_main_process():

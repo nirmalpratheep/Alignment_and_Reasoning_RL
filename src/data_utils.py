@@ -181,23 +181,35 @@ def load_datasets(config, prepare_sft_format=False, rank=0, world_size=1):
         seed=42
     )
     
+    # Get batch size (handle both SFT and GRPO config formats)
+    batch_size = config.training.get('batch_size') or config.training.get('batch_size_per_gpu')
+    if batch_size is None:
+        raise ValueError("Config must specify either training.batch_size or training.batch_size_per_gpu")
+    
+    # Custom collate function to handle dictionary batches
+    def collate_fn(batch):
+        """Custom collate that returns list of dicts instead of dict of tensors."""
+        return batch  # Just return the list of dictionaries as-is
+    
     # Create DataLoaders
     train_loader = DataLoader(
         train_dataset,
-        batch_size=config.training.batch_size,
+        batch_size=batch_size,
         sampler=train_sampler,
         num_workers=config.data.get('num_workers', 2),
         pin_memory=True,
-        drop_last=True  # Drop incomplete batches for consistent FSDP training
+        drop_last=True,  # Drop incomplete batches for consistent FSDP training
+        collate_fn=collate_fn  # Use custom collate
     )
     
     val_loader = DataLoader(
         val_dataset,
-        batch_size=config.training.batch_size,
+        batch_size=batch_size,
         sampler=val_sampler,
         num_workers=config.data.get('num_workers', 2),
         pin_memory=True,
-        drop_last=False
+        drop_last=False,
+        collate_fn=collate_fn  # Use custom collate
     )
     
     if is_main:
@@ -206,7 +218,7 @@ def load_datasets(config, prepare_sft_format=False, rank=0, world_size=1):
         print(f"  Total val samples: {len(val_data)}")
         print(f"  Samples per GPU (train): {len(train_data) // world_size}")
         print(f"  Samples per GPU (val): {len(val_data) // world_size}")
-        print(f"  Batch size per GPU: {config.training.batch_size}")
+        print(f"  Batch size per GPU: {batch_size}")
         print(f"  Total batches per epoch: {len(train_loader)}")
         print("="*80)
     

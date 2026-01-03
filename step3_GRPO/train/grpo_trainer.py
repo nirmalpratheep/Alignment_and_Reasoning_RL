@@ -121,6 +121,8 @@ def generate_completions_batch(
     Returns:
         List of generated completion strings
     """
+    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    
     model.eval()
     
     completions = []
@@ -135,18 +137,21 @@ def generate_completions_batch(
             max_length=512
         ).to(device)
         
-        # Generate completions with sampling
-        outputs = model.generate(
-            input_ids=inputs['input_ids'],
-            attention_mask=inputs['attention_mask'],
-            max_new_tokens=config.grpo.max_tokens,
-            min_new_tokens=config.grpo.get('min_tokens', 4),
-            temperature=config.grpo.temperature,
-            do_sample=True,
-            top_p=1.0,
-            pad_token_id=tokenizer.pad_token_id,
-            eos_token_id=tokenizer.eos_token_id,
-        )
+        # Use FSDP's summon_full_params to temporarily gather all parameters for generation
+        # This is necessary because .generate() doesn't work with sharded parameters
+        with FSDP.summon_full_params(model, writeback=False):
+            # Generate completions with sampling
+            outputs = model.generate(
+                input_ids=inputs['input_ids'],
+                attention_mask=inputs['attention_mask'],
+                max_new_tokens=config.grpo.max_tokens,
+                min_new_tokens=config.grpo.get('min_tokens', 4),
+                temperature=config.grpo.temperature,
+                do_sample=True,
+                top_p=1.0,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+            )
         
         # Decode only the generated part (exclude prompt)
         for i, output_ids in enumerate(outputs):

@@ -163,25 +163,46 @@ def is_main_process() -> bool:
     return get_rank() == 0
 
 
-def get_fsdp_wrap_policy(model_name: str):
+def get_fsdp_wrap_policy(model):
     """Get transformer-based auto-wrap policy for FSDP.
     
     This policy wraps each transformer layer (decoder block) separately,
     which provides good balance between memory efficiency and communication overhead.
     
     Args:
-        model_name: Name of the model (used to determine layer type)
+        model: The model to wrap (used to detect layer type)
         
     Returns:
         FSDP auto-wrap policy function
     """
     from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
-    from transformers.models.qwen2 import Qwen2DecoderLayer
+    from functools import partial
     
-    # For Qwen2.5 models, wrap each decoder layer
-    return transformer_auto_wrap_policy(
-        transformer_layer_cls={Qwen2DecoderLayer},
+    # Dynamically detect the transformer layer class from the model
+    # This works for any transformer model (Qwen2, Llama, GPT, etc.)
+    transformer_layer_cls = None
+    
+    # Try to find the decoder layer class from the model
+    for module in model.modules():
+        module_name = module.__class__.__name__
+        if 'DecoderLayer' in module_name or 'Block' in module_name or 'Layer' in module_name:
+            # Found a likely transformer layer
+            if hasattr(module, 'self_attn') or hasattr(module, 'attn'):
+                transformer_layer_cls = module.__class__
+                print_rank_0(f"  Detected transformer layer: {transformer_layer_cls.__name__}")
+                break
+    
+    if transformer_layer_cls is None:
+        raise ValueError("Could not detect transformer layer class from model")
+    
+    # Create the auto-wrap policy using functools.partial
+    # This returns a callable that FSDP can use
+    auto_wrap_policy = partial(
+        transformer_auto_wrap_policy,
+        transformer_layer_cls={transformer_layer_cls},
     )
+    
+    return auto_wrap_policy
 
 
 def get_fsdp_mixed_precision_policy(dtype_str: str = "bfloat16"):
@@ -297,8 +318,8 @@ def wrap_model_with_fsdp(model, config, local_rank: int):
         ShardingStrategy.FULL_SHARD
     )
     
-    # Get auto-wrap policy
-    auto_wrap_policy = get_fsdp_wrap_policy(config.model.name)
+    # Get auto-wrap policy (pass model to detect layer class)
+    auto_wrap_policy = get_fsdp_wrap_policy(model)
     
     # Get mixed precision policy
     mixed_precision = get_fsdp_mixed_precision_policy(config.fsdp.mixed_precision)
