@@ -12,55 +12,8 @@ sys.path.insert(0, str(project_root))
 from src.config_loader import load_config, validate_config
 from src.training_worker import training_loop
 from src.eval_worker import eval_worker
-from utils.dataset_loader import MathDatasetLoader
+from src.data_utils import load_datasets
 from transformers import AutoTokenizer
-
-
-def load_datasets(config):
-    """Load and prepare datasets.
-    
-    Args:
-        config: Configuration object
-        
-    Returns:
-        Tuple of (train_data, val_data, tokenizer)
-    """
-    print("="*80)
-    print("LOADING DATASETS")
-    print("="*80)
-    
-    # Load MATH dataset
-    loader = MathDatasetLoader()
-    datasets, subsets, total_train, total_test = loader.load_all_subsets()
-    
-    print(f"Loaded {len(subsets)} subsets")
-    print(f"Total train: {total_train}, Total test: {total_test}")
-    
-    # Collect examples
-    train_examples = loader.collect_train_examples(include_metadata=True)
-    test_examples = loader.collect_test_examples(include_metadata=True)
-    
-    # Load prompt template
-    with open(config.data.prompt_file, 'r') as f:
-        prompt_template = f.read()
-    
-    # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(config.model.name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    # Prepare SFT format
-    from src.data_utils import prepare_sft_dataset
-    
-    print("\nPreparing SFT format...")
-    train_data = prepare_sft_dataset(train_examples, prompt_template)
-    val_data = prepare_sft_dataset(test_examples, prompt_template)
-    
-    print(f"✓ Train samples: {len(train_data)}")
-    print(f"✓ Val samples: {len(val_data)}")
-    print("="*80)
-    
-    return train_data, val_data, tokenizer
 
 
 def main():
@@ -100,7 +53,7 @@ def main():
     print(f"✓ W&B initialized: {run_name} (ID: {wandb.run.id})\n")
     
     # Load datasets
-    train_data, val_data, tokenizer = load_datasets(config)
+    train_data, val_data, tokenizer = load_datasets(config, prepare_sft_format=True)
     
     # Create multiprocessing queue for checkpoint paths
     eval_queue = mp.Queue(maxsize=config.checkpointing.queue_maxsize)

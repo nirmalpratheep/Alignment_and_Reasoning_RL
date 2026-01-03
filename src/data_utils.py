@@ -1,5 +1,9 @@
 """Data preparation utilities for SFT training."""
 from utils.drgrpo_grader import r1_zero_reward_fn
+from utils.dataset_loader import MathDatasetLoader
+from transformers import AutoTokenizer
+import torch
+from torch.utils.data import Dataset, DataLoader, DistributedSampler
 
 
 def extract_answer_from_solution(solution: str) -> str:
@@ -79,3 +83,131 @@ def prepare_sft_dataset(examples: list, prompt_template: str) -> list:
         })
     
     return sft_data
+
+
+class MathDataset(Dataset):
+    """PyTorch Dataset wrapper for MATH examples."""
+    
+    def __init__(self, examples):
+        """Initialize dataset with examples.
+        
+        Args:
+            examples: List of dataset examples (either raw or SFT-formatted)
+        """
+        self.examples = examples
+    
+    def __len__(self):
+        return len(self.examples)
+    
+    def __getitem__(self, idx):
+        return self.examples[idx]
+
+
+def load_datasets(config, prepare_sft_format=False, rank=0, world_size=1):
+    """Load and prepare datasets with DistributedSampler for multi-GPU training.
+    
+    Args:
+        config: Configuration object
+        prepare_sft_format: If True, prepare data in SFT format (prompt-response pairs).
+                          If False, return raw examples (for GRPO).
+        rank: Current process rank (for distributed training)
+        world_size: Total number of processes (for distributed training)
+        
+    Returns:
+        Tuple of (train_loader, val_loader, tokenizer)
+        - train_loader: DataLoader with DistributedSampler for training
+        - val_loader: DataLoader with DistributedSampler for validation
+        - tokenizer: Loaded tokenizer
+    """
+    is_main = (rank == 0)
+    
+    if is_main:
+        print("="*80)
+        print("LOADING DATASETS")
+        print("="*80)
+    
+    # Load MATH dataset
+    loader = MathDatasetLoader()
+    datasets, subsets, total_train, total_test = loader.load_all_subsets()
+    
+    if is_main:
+        print(f"Loaded {len(subsets)} subsets")
+        print(f"Total train: {total_train}, Total test: {total_test}")
+    
+    # Collect examples
+    train_examples = loader.collect_train_examples(include_metadata=True)
+    test_examples = loader.collect_test_examples(include_metadata=True)
+    
+    # Load tokenizer
+    if is_main:
+        print(f"\nLoading tokenizer from: {config.model.name}")
+    tokenizer = AutoTokenizer.from_pretrained(config.model.name, trust_remote_code=True)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    # Prepare data based on format requested
+    if prepare_sft_format:
+        # Load prompt template
+        with open(config.data.prompt_file, 'r') as f:
+            prompt_template = f.read()
+        
+        if is_main:
+            print("\nPreparing SFT format...")
+        train_data = prepare_sft_dataset(train_examples, prompt_template)
+        val_data = prepare_sft_dataset(test_examples, prompt_template)
+    else:
+        # Return raw examples (for GRPO)
+        train_data = train_examples
+        val_data = test_examples
+    
+    # Create PyTorch Datasets
+    train_dataset = MathDataset(train_data)
+    val_dataset = MathDataset(val_data)
+    
+    # Create DistributedSamplers
+    train_sampler = DistributedSampler(
+        train_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=True,
+        seed=42
+    )
+    
+    val_sampler = DistributedSampler(
+        val_dataset,
+        num_replicas=world_size,
+        rank=rank,
+        shuffle=False,  # Don't shuffle validation
+        seed=42
+    )
+    
+    # Create DataLoaders
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.training.batch_size,
+        sampler=train_sampler,
+        num_workers=config.data.get('num_workers', 2),
+        pin_memory=True,
+        drop_last=True  # Drop incomplete batches for consistent FSDP training
+    )
+    
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config.training.batch_size,
+        sampler=val_sampler,
+        num_workers=config.data.get('num_workers', 2),
+        pin_memory=True,
+        drop_last=False
+    )
+    
+    if is_main:
+        print(f"\n✓ Dataset Distribution:")
+        print(f"  Total train samples: {len(train_data)}")
+        print(f"  Total val samples: {len(val_data)}")
+        print(f"  Samples per GPU (train): {len(train_data) // world_size}")
+        print(f"  Samples per GPU (val): {len(val_data) // world_size}")
+        print(f"  Batch size per GPU: {config.training.batch_size}")
+        print(f"  Total batches per epoch: {len(train_loader)}")
+        print("="*80)
+    
+    return train_loader, val_loader, tokenizer

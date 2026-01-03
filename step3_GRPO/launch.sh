@@ -47,8 +47,17 @@ cd "$SCRIPT_DIR"
 # Launch distributed training with torchrun
 echo "Launching training with torchrun..."
 echo "  - Number of GPUs: 2"
+echo "  - Launcher: step3_grpo.py"
 echo "  - Config: configs/fsdp_2gpu.yaml"
 echo ""
+
+# Parse command line arguments for test mode
+TEST_MODE=""
+if [ "$1" == "--test" ]; then
+    TEST_MODE="--test-mode"
+    echo "  - Mode: TEST (setup verification only)"
+    echo ""
+fi
 
 # Use python -m torch.distributed.run if torchrun is not available
 if command -v torchrun &> /dev/null; then
@@ -67,8 +76,9 @@ $TORCHRUN_CMD \
     --node_rank=0 \
     --master_addr=localhost \
     --master_port=29500 \
-    train_grpo_fsdp.py \
-    --config configs/fsdp_2gpu.yaml
+    step3_grpo.py \
+    --config configs/fsdp_2gpu.yaml \
+    $TEST_MODE
 
 # Check if training failed
 if [ $? -ne 0 ]; then

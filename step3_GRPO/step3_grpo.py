@@ -1,165 +1,181 @@
-"""Main orchestrator for dual-GPU GRPO training pipeline."""
-import multiprocessing as mp
-import wandb
+"""FSDP GRPO Training Launcher for torchrun.
+
+This is the entry point for distributed training with FSDP.
+Launch with torchrun for multi-GPU training:
+    
+    torchrun --nproc_per_node=2 step3_grpo.py
+
+Or use the convenience scripts:
+    bash launch.sh
+    .\launch.ps1  (Windows)
+"""
 import sys
-from datetime import datetime
 from pathlib import Path
+from datetime import datetime
+
+import torch
+import torch.distributed as dist
+import wandb
 
 # Add project root to path for imports
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
+# Import distributed utilities from fsdp_utils
+from step3_GRPO.train.fsdp_utils import (
+    setup_distributed,
+    cleanup_distributed,
+    print_rank_0,
+    is_main_process,
+    load_and_wrap_fsdp_model,
+)
+
+# Import training components
 from src.config_loader import load_config, validate_config
-from src.grpo_training_worker import grpo_training_loop
-from src.eval_worker import eval_worker
-from utils.dataset_loader import MathDatasetLoader
-from transformers import AutoTokenizer
-
-
-def load_datasets(config):
-    """Load and prepare datasets.
-    
-    Args:
-        config: Configuration object
-        
-    Returns:
-        Tuple of (train_data, val_data, tokenizer)
-    """
-    print("="*80)
-    print("LOADING DATASETS")
-    print("="*80)
-    
-    # Load MATH dataset
-    loader = MathDatasetLoader()
-    datasets, subsets, total_train, total_test = loader.load_all_subsets()
-    
-    print(f"Loaded {len(subsets)} subsets")
-    print(f"Total train: {total_train}, Total test: {total_test}")
-    
-    # Collect examples
-    train_examples = loader.collect_train_examples(include_metadata=True)
-    test_examples = loader.collect_test_examples(include_metadata=True)
-    
-    # Load tokenizer from SFT checkpoint
-    print(f"\nLoading tokenizer from: {config.model.name}")
-    tokenizer = AutoTokenizer.from_pretrained(config.model.name, trust_remote_code=True)
-    if tokenizer.pad_token is None:
-        tokenizer.pad_token = tokenizer.eos_token
-    
-    print(f"✓ Train samples: {len(train_examples)}")
-    print(f"✓ Val samples: {len(test_examples)}")
-    print("="*80)
-    
-    return train_examples, test_examples, tokenizer
+from src.data_utils import load_datasets
 
 
 def main():
-    """Main orchestrator for dual-GPU GRPO training."""
-    # Load configuration
+    """Main FSDP GRPO training launcher.
+    
+    Steps:
+    1. Initialize distributed process group (NCCL)
+    2. Set CUDA device for each rank
+    3. Load configuration
+    4. Load datasets
+    5. TODO: Create model with FSDP wrapping
+    6. TODO: Run training loop
+    """
+    
+    # ==============================================
+    # Step 1: Distributed Setup (CRITICAL - DO FIRST!)
+    # ==============================================
+    # This handles:
+    # - Reading LOCAL_RANK, RANK, WORLD_SIZE from environment
+    # - torch.cuda.set_device(local_rank)
+    # - dist.init_process_group(backend="nccl")
+    # - dist.barrier()
+    
+    print_rank_0("="*70)
+    print_rank_0("FSDP GRPO Training Pipeline")
+    print_rank_0("="*70)
+    
+    rank, world_size, local_rank = setup_distributed()
+    
+    print_rank_0(f"✓ Distributed setup complete")
+    print_rank_0(f"  Rank: {rank}/{world_size}")
+    print_rank_0(f"  GPU: {torch.cuda.get_device_name(local_rank)}")
+    print_rank_0("")
+    
+    # ==============================================
+    # Step 2: Load Configuration
+    # ==============================================
+    if is_main_process():
+        print("Loading configuration...")
+    
     config = load_config("config/grpo_config.yaml")
     validate_config(config)
     
-    print("\n" + "="*80)
-    print("DUAL-GPU GRPO TRAINING PIPELINE")
-    print("="*80)
-    print(f"Training Device: {config.training.device}")
-    print(f"Evaluation Device: {config.evaluation.device}")
-    print(f"Base Model: {config.model.name}")
-    print("="*80)
+    if is_main_process():
+        print(f"✓ Config loaded: {config.model.name}")
+        print("")
     
-    # Initialize W&B
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    run_name = f"math-grpo-dual-gpu-{timestamp}"
-    
-    wandb.init(
-        project=config.logging.wandb_project,
-        entity=config.logging.wandb_entity,
-        name=run_name,
-        config=config.to_dict(),
-        notes=f"Dual-GPU GRPO training - {timestamp}",
-        tags=["grpo", "math", "dual-gpu", "bfloat16", "rl"]
-    )
-    
-    # Store wandb run info to pass to eval worker
-    wandb_run_info = {
-        "name": run_name,
-        "id": wandb.run.id,
-        "project": config.logging.wandb_project,
-        "entity": config.logging.wandb_entity
-    }
-    
-    print(f"✓ W&B initialized: {run_name} (ID: {wandb.run.id})\n")
-    
-    # Load datasets
-    train_data, val_data, tokenizer = load_datasets(config)
-    
-    # Create multiprocessing queue for checkpoint paths
-    eval_queue = mp.Queue(maxsize=config.checkpointing.queue_maxsize)
-    
-    # Start evaluation worker process on GPU 1
-    print("\n" + "="*80)
-    print("STARTING PROCESSES")
-    print("="*80)
-    
-    eval_process = mp.Process(
-        target=eval_worker,
-        args=(eval_queue, config, val_data, 42, None, wandb_run_info),
-        name="EvalWorker-GPU1"
-    )
-    eval_process.start()
-    print(f"✓ Evaluation worker started (PID: {eval_process.pid})")
-    
-    # Run GRPO training loop on GPU 0 (main process)
-    try:
-        grpo_training_loop(
-            config=config,
-            train_data=train_data,
-            tokenizer=tokenizer,
-            eval_queue=eval_queue
+    # ==============================================
+    # Step 3: Initialize W&B (rank 0 only)
+    # ==============================================
+    if is_main_process():
+        print("Initializing W&B...")
+        
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        run_name = f"grpo-fsdp-{world_size}gpu-{timestamp}"
+        
+        wandb.init(
+            project=config.logging.wandb_project,
+            entity=config.logging.wandb_entity,
+            name=run_name,
+            config=config.to_dict(),
+            notes=f"FSDP GRPO training - {world_size} GPUs",
+            tags=["grpo", "fsdp", "math", f"{world_size}gpu"]
         )
-    except KeyboardInterrupt:
-        print("\n⚠ Training interrupted by user")
-    except Exception as e:
-        print(f"\n⚠ Training failed with error: {e}")
-        import traceback
-        traceback.print_exc()
-    finally:
-        # Cleanup
-        print("\n" + "="*80)
-        print("CLEANUP")
-        print("="*80)
         
-        # Send shutdown signal to eval worker
-        if not eval_queue.full():
-            eval_queue.put(None)
-        
-        # Wait for eval worker to finish
-        print("Waiting for evaluation worker to finish...")
-        print("  (This may take a while as it processes all checkpoints)")
-        eval_process.join(timeout=600)  # 10 minutes timeout
-        
-        if eval_process.is_alive():
-            print("⚠ Evaluation worker didn't stop within timeout, terminating...")
-            eval_process.terminate()
-            eval_process.join(timeout=30)
-            if eval_process.is_alive():
-                print("⚠ Force killing eval worker...")
-                eval_process.kill()
-                eval_process.join()
-        
-        print("✓ All processes stopped")
-        
-        # Finish W&B
-        wandb.finish()
-        print("✓ W&B run finished")
+        print(f"✓ W&B initialized: {run_name}")
+        print(f"  Run ID: {wandb.run.id}")
+        print("")
     
-    print("\n" + "="*80)
-    print("GRPO TRAINING PIPELINE COMPLETED")
-    print("="*80)
+    # Wait for rank 0 to finish W&B setup
+    dist.barrier()
+    
+    # ==============================================
+    # Step 4: Load Datasets with DistributedSampler
+    # ==============================================
+    if is_main_process():
+        print("Loading datasets with distributed sampling...")
+    
+    train_loader, val_loader, tokenizer = load_datasets(
+        config, 
+        prepare_sft_format=False,
+        rank=rank,
+        world_size=world_size
+    )
+    
+    # Synchronize all ranks after data loading
+    dist.barrier()
+    
+    # ==============================================
+    # Step 5: Load Model with FSDP
+    # ==============================================
+    if is_main_process():
+        print("Loading and wrapping model with FSDP...")
+    
+    # Load model and wrap with FSDP
+    # This handles:
+    # - Loading model on CPU first
+    # - Wrapping with FSDP (FULL_SHARD strategy)
+    # - Mixed precision (bfloat16)
+    # - Moving sharded model to GPU
+    # - Enabling gradient checkpointing
+    # - Optional torch.compile for H100
+    model = load_and_wrap_fsdp_model(config, local_rank)
+    
+    if is_main_process():
+        print(f"✓ Model ready for training on {world_size} GPUs")
+        print("")
+    
+    # Synchronize all ranks after model loading
+    dist.barrier()
+    
+    # ==============================================
+    # Step 6: Training Loop (TODO - Module 3+)
+    # ==============================================
+    # TODO: Create optimizer
+    # TODO: Implement GRPO training loop with train_loader
+    # Example:
+    #   for epoch in range(num_epochs):
+    #       train_sampler.set_epoch(epoch)  # Important for proper shuffling!
+    #       for batch in train_loader:
+    #           # Each GPU gets different samples automatically
+    #           ...
+    # TODO: Add checkpointing and W&B logging
+    
+    print_rank_0("="*70)
+    print_rank_0("Setup complete! Ready for training loop...")
+    print_rank_0("(Training logic to be added in next modules)")
+    print_rank_0("="*70)
+    
+    # ==============================================
+    # Step 7: Cleanup
+    # ==============================================
+    dist.barrier()
+    cleanup_distributed()
+    print_rank_0("✓ Training session completed!")
 
 
 if __name__ == "__main__":
-    # Set multiprocessing start method
-    mp.set_start_method('spawn', force=True)
-    
-    main()
+    try:
+        main()
+    except Exception as e:
+        rank = dist.get_rank() if dist.is_initialized() else 0
+        print(f"[Rank {rank}] ERROR: {e}")
+        if dist.is_initialized():
+            cleanup_distributed()
+        raise
