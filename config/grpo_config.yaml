@@ -41,6 +41,19 @@ grpo:
   loss_type: "reinforce_with_baseline"  # From reference (vs no_baseline or grpo_clip)
   gpu_memory_utilization: 0.85     # For vLLM generation
   
+# vLLM Rollout Configuration
+vllm:
+  enabled: true                      # Use vLLM for high-throughput rollout
+  single_gpu: true                   # Use single GPU (GPU 1) vs multi-GPU
+  gpu_ids: [1]                       # GPU IDs for vLLM inference
+  tensor_parallel_size: 1            # 1 for single GPU, 2 for multi-GPU
+  vllm_gpu_memory_utilization: 0.85  # Memory fraction for vLLM
+  max_model_len: 2048                # Max sequence length
+  temp_checkpoint_dir: "results/grpo_temp_checkpoints"
+  swap_space: 4                      # GB of CPU swap space
+  enforce_eager: false               # Disable CUDA graph (false = faster init)
+  keep_last_n_temp: 2                # Keep N most recent temp checkpoints
+  
 # Data Configuration
 data:
   prompt_file: "prompts/rl_zero.prompt"

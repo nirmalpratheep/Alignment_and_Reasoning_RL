@@ -102,74 +102,41 @@ def save_fsdp_checkpoint(
     return str(checkpoint_dir)
 
 
-def generate_completions_batch(
-    model: FSDP,
+def generate_completions_vllm(
+    vllm_engine,
     prompts: list,
-    tokenizer,
-    config,
-    device
+    config
 ):
-    """Generate K completions for each prompt using sampling.
+    """Generate completions using vLLM for high-throughput inference.
+    
+    This replaces the old FSDP.summon_full_params + HF generate() approach
+    with vLLM's optimized PagedAttention and continuous batching.
     
     Args:
-        model: FSDP model
+        vllm_engine: VLLMRolloutEngine instance
         prompts: List of prompt strings
-        tokenizer: Tokenizer
         config: Configuration with GRPO params
-        device: Device to run on
         
     Returns:
         List of generated completion strings
     """
-    from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
+    from vllm import SamplingParams
     
-    model.eval()
+    # Create sampling parameters for vLLM
+    sampling_params = SamplingParams(
+        temperature=config.grpo.temperature,
+        max_tokens=config.grpo.max_tokens,
+        min_tokens=config.grpo.get('min_tokens', 4),
+        top_p=1.0,
+        skip_special_tokens=False,  # Keep special tokens for reward computation
+    )
     
-    all_completions = []
+    # Generate with vLLM (handles batching automatically)
+    completions = vllm_engine.generate_batch(prompts, sampling_params)
     
-    # Generate in chunks to avoid OOM with large batches
-    # With FSDP's summon_full_params, we need to be conservative with batch size
-    chunk_size = 64  # Generate 64 prompts at a time
-    
-    with torch.no_grad():
-        # Use FSDP's summon_full_params to temporarily gather all parameters for generation
-        # This is necessary because .generate() doesn't work with sharded parameters
-        with FSDP.summon_full_params(model, writeback=False):
-            for chunk_start in range(0, len(prompts), chunk_size):
-                chunk_end = min(chunk_start + chunk_size, len(prompts))
-                chunk_prompts = prompts[chunk_start:chunk_end]
-                
-                # Tokenize prompts
-                inputs = tokenizer(
-                    chunk_prompts,
-                    return_tensors="pt",
-                    padding=True,
-                    truncation=True,
-                    max_length=512
-                ).to(device)
-                
-                # Generate completions with sampling
-                outputs = model.generate(
-                    input_ids=inputs['input_ids'],
-                    attention_mask=inputs['attention_mask'],
-                    max_new_tokens=config.grpo.max_tokens,
-                    min_new_tokens=config.grpo.get('min_tokens', 4),
-                    temperature=config.grpo.temperature,
-                    do_sample=True,
-                    top_p=1.0,
-                    pad_token_id=tokenizer.pad_token_id,
-                    eos_token_id=tokenizer.eos_token_id,
-                )
-                
-                # Decode only the generated part (exclude prompt)
-                for i, output_ids in enumerate(outputs):
-                    prompt_length = inputs['input_ids'][i].shape[0]
-                    generated_ids = output_ids[prompt_length:]
-                    completion = tokenizer.decode(generated_ids, skip_special_tokens=False)
-                    all_completions.append(completion)
-    
-    model.train()
-    return all_completions
+    return completions
+
+
 
 
 def compute_log_probs(
@@ -242,12 +209,14 @@ def compute_log_probs(
 
 def grpo_training_step(
     model: FSDP,
+    vllm_engine,  # NEW: VLLMRolloutEngine for high-throughput generation
     batch: dict,
     tokenizer,
     optimizer: torch.optim.Optimizer,
     config,
     device,
-    step: int
+    step: int,
+    rank: int  # NEW: Needed for checkpoint saving
 ) -> dict:
     """Single GRPO training step.
     
@@ -294,16 +263,81 @@ def grpo_training_step(
         all_prompts.extend([prompt] * K)
         all_ground_truths.extend([gt] * K)
     
-    # Generate all completions in one large batch
-    # This is much more efficient than generating K at a time
+    # === Phase 1: Save temp checkpoint & Generate K completions with vLLM ===
     print_rank_0(f"[Step {step}] Generating {len(all_prompts)} completions ({len(prompts)} problems × {K} samples)...")
     import time
+    from step3_GRPO.train.checkpoint_utils import save_temp_checkpoint, cleanup_old_temp_checkpoints
+    import torch.distributed as dist
+    
     gen_start = time.time()
-    all_completions = generate_completions_batch(
-        model, all_prompts, tokenizer, config, device
+    
+    # Save current FSDP weights to temp checkpoint (rank 0 only)
+    print_rank_0(f"[Step {step}] Saving temp checkpoint for vLLM...")
+    checkpoint_start = time.time()
+    
+    # Synchronize before checkpoint save
+    dist.barrier()
+    
+    temp_checkpoint_path = save_temp_checkpoint(
+        model=model,
+        step=step,
+        temp_dir=config.vllm.temp_checkpoint_dir,
+        rank=rank,
+        tokenizer=tokenizer
     )
+    
+    # Broadcast checkpoint path to all ranks
+    if rank == 0:
+        checkpoint_path_list = [temp_checkpoint_path]
+    else:
+        checkpoint_path_list = [None]
+    dist.broadcast_object_list(checkpoint_path_list, src=0)
+    temp_checkpoint_path = checkpoint_path_list[0]
+    
+    checkpoint_time = time.time() - checkpoint_start
+    print_rank_0(f"[Step {step}] ✓ Checkpoint saved ({checkpoint_time:.1f}s)")
+    
+    # Synchronize after checkpoint save
+    dist.barrier()
+    
+    # Load checkpoint into vLLM engine and generate (rank 0 only)
+    if rank == 0:
+        print_rank_0(f"[Step {step}] Loading checkpoint into vLLM engine...")
+        vllm_load_start = time.time()
+        vllm_engine.load_from_checkpoint(temp_checkpoint_path)
+        vllm_load_time = time.time() - vllm_load_start
+        
+        # Generate with vLLM
+        vllm_gen_start = time.time()
+        all_completions = generate_completions_vllm(
+            vllm_engine, all_prompts, config
+        )
+        vllm_gen_time = time.time() - vllm_gen_start
+        print_rank_0(f"[Step {step}] ✓ vLLM generation: {vllm_gen_time:.1f}s ({len(all_completions)/vllm_gen_time:.1f} completions/s)")
+    else:
+        # Other ranks wait
+        all_completions = None
+        vllm_load_time = 0.0
+        vllm_gen_time = 0.0
+    
+    # Broadcast completions to all ranks
+    if rank == 0:
+        completions_list = [all_completions]
+    else:
+        completions_list = [None]
+    dist.broadcast_object_list(completions_list, src=0)
+    all_completions = completions_list[0]
+    
+    # Clean up old temp checkpoints (rank 0 only)
+    if rank == 0:
+        cleanup_old_temp_checkpoints(
+            temp_dir=config.vllm.temp_checkpoint_dir,
+            keep_last_n=config.vllm.get('keep_last_n_temp', 2),
+            rank=rank
+        )
+    
     gen_time = time.time() - gen_start
-    print_rank_0(f"[Step {step}] ✓ Generation complete ({gen_time:.1f}s, {len(all_completions)/gen_time:.1f} completions/s)")
+    print_rank_0(f"[Step {step}] ✓ Total rollout time: {gen_time:.1f}s ({len(all_completions)/gen_time:.1f} completions/s)")
     
     # === Phase 2: Compute rewards using existing math reward function ===
     print_rank_0(f"[Step {step}] Computing rewards...")
@@ -382,11 +416,20 @@ def grpo_training_step(
     print_rank_0(f"[Step {step}] ✓ Backward pass complete")
 
     
-    # Return unscaled loss for logging
+    # Return unscaled loss and metrics for logging
     metrics = {
         'loss': (loss.item() * grad_accum_steps),  # Unscale for logging
         **adv_stats,  # Includes reward stats and advantage stats
+        # vLLM rollout timing metrics
+        'rollout/total_time': gen_time,
+        'rollout/checkpoint_save_time': checkpoint_time,
+        'rollout/completions_per_second': len(all_completions) / gen_time if gen_time > 0 else 0,
     }
+    
+    # Add rank-specific vLLM metrics (only from rank 0 where vLLM runs)
+    if rank == 0:
+        metrics['rollout/vllm_load_time'] = vllm_load_time
+        metrics['rollout/vllm_gen_time'] = vllm_gen_time
     
     return metrics
 
@@ -428,6 +471,24 @@ def grpo_training_loop(
     print_rank_0(f"Gradient accumulation steps: {grad_accum_steps}")
     print_rank_0(f"Total training steps: {max_steps}")
     
+    # Initialize vLLM engine for rollout (rank 0 only)
+    vllm_engine = None
+    if config.vllm.get('enabled', True):
+        if rank == 0:
+            from step3_GRPO.train.vllm_rollout import VLLMRolloutEngine
+            
+            print_rank_0("\n" + "="*70)
+            print_rank_0("Initializing vLLM Rollout Engine")
+            print_rank_0("="*70)
+            
+            vllm_engine = VLLMRolloutEngine(
+                config=config,
+                gpu_ids=config.vllm.gpu_ids,
+                temp_dir=config.vllm.temp_checkpoint_dir
+            )
+            
+            print_rank_0("="*70 + "\n")
+    
     # Training loop
     model.train()
     global_step = 0
@@ -454,12 +515,14 @@ def grpo_training_loop(
             
             metrics = grpo_training_step(
                 model=model,
+                vllm_engine=vllm_engine,
                 batch=batch,
                 tokenizer=tokenizer,
                 optimizer=optimizer,
                 config=config,
                 device=device,
-                step=global_step
+                step=global_step,
+                rank=rank
             )
             
             accum_step += 1
@@ -492,7 +555,7 @@ def grpo_training_loop(
                 
                 # Logging
                 if is_main_process() and global_step % config.logging.log_every_steps == 0:
-                    wandb.log({
+                    log_dict = {
                         'train/loss': metrics['loss'],
                         'train/reward_mean': metrics['reward_mean'],
                         'train/reward_std': metrics['reward_std'],
@@ -504,7 +567,18 @@ def grpo_training_loop(
                         'train/advantage_min': metrics['advantage_min'],
                         'train/learning_rate': scheduler.get_last_lr()[0],
                         'train/step': global_step,
-                    })
+                        # vLLM rollout performance metrics
+                        'train/rollout_total_time': metrics['rollout/total_time'],
+                        'train/rollout_checkpoint_save_time': metrics['rollout/checkpoint_save_time'],
+                        'train/rollout_throughput': metrics['rollout/completions_per_second'],
+                    }
+                    
+                    # Add rank-specific vLLM metrics if available
+                    if 'rollout/vllm_load_time' in metrics:
+                        log_dict['train/rollout_vllm_load_time'] = metrics['rollout/vllm_load_time']
+                        log_dict['train/rollout_vllm_gen_time'] = metrics['rollout/vllm_gen_time']
+                    
+                    wandb.log(log_dict)
                 
                 # Update progress
                 if is_main_process():
@@ -592,6 +666,11 @@ def grpo_training_loop(
             print(f"\n⚠ Final evaluation failed: {e}")
             import traceback
             traceback.print_exc()
+    
+    # Cleanup vLLM engine
+    if vllm_engine is not None:
+        if rank == 0:
+            vllm_engine.cleanup()
     
     # Wait for evaluation to complete
     dist.barrier()
