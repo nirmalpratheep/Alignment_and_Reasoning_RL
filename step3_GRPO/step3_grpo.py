@@ -33,6 +33,7 @@ from step3_GRPO.train.fsdp_utils import (
 # Import training components
 from src.config_loader import load_config, validate_config
 from src.data_utils import load_datasets
+from step3_GRPO.train.grpo_trainer import grpo_training_loop
 
 
 def main():
@@ -145,21 +146,26 @@ def main():
     dist.barrier()
     
     # ==============================================
-    # Step 6: Training Loop (TODO - Module 3+)
+    # Step 6: GRPO Training Loop
     # ==============================================
-    # TODO: Create optimizer
-    # TODO: Implement GRPO training loop with train_loader
-    # Example:
-    #   for epoch in range(num_epochs):
-    #       train_sampler.set_epoch(epoch)  # Important for proper shuffling!
-    #       for batch in train_loader:
-    #           # Each GPU gets different samples automatically
-    #           ...
-    # TODO: Add checkpointing and W&B logging
-    
+    print_rank_0("\n" + "="*70)
+    print_rank_0("Starting GRPO Training...")
     print_rank_0("="*70)
-    print_rank_0("Setup complete! Ready for training loop...")
-    print_rank_0("(Training logic to be added in next modules)")
+    
+    # Run GRPO training loop
+    grpo_training_loop(
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        tokenizer=tokenizer,
+        config=config,
+        rank=rank,
+        world_size=world_size,
+        local_rank=local_rank
+    )
+    
+    print_rank_0("\n" + "="*70)
+    print_rank_0("GRPO Training Complete!")
     print_rank_0("="*70)
     
     # ==============================================
