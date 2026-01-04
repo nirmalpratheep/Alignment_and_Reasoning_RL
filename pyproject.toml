@@ -49,3 +49,8 @@ dev = [
     "jupyter>=1.0.0",
     "ipykernel>=6.29.0",
 ]
+
+# uv-specific configuration for flash-attn build
+[tool.uv]
+extra-build-dependencies = { flash-attn = ["torch", "packaging", "setuptools", "wheel"] }
+

@@ -26,17 +26,9 @@ def compute_math_rewards(
     rewards = []
     
     for completion, ground_truth in zip(completions, ground_truths):
-        # Prepare problem dict for grader
-        problem = {'solution': ground_truth}
-        
-        # Compute reward using existing grader
-        # r1_zero_reward_fn expects lists
-        reward_value = r1_zero_reward_fn([problem], [completion])
-        
-        # Extract scalar reward
-        if isinstance(reward_value, list):
-            reward_value = reward_value[0] if reward_value else 0.0
-        
+        # r1_zero_reward_fn takes (response, ground_truth) and returns dict with 'reward' key
+        result = r1_zero_reward_fn(completion, ground_truth, fast=True)
+        reward_value = result['reward'] if isinstance(result, dict) else float(result)
         rewards.append(float(reward_value))
     
     return rewards
