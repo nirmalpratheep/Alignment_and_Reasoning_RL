@@ -6,7 +6,6 @@ results/optuna
 results/analysis
 results/eval_logs
 results/checkpoints
-step*
 results/grpo_fsdp_checkpoints
 results/grpo_temp_checkpoints
 results/inference
